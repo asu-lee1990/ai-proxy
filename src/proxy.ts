@@ -617,7 +617,7 @@ export class ProxyServer {
     }
   }
 
-  start(): void {
+  start(): http.Server | https.Server | net.Server {
     if (this.config.protocol === 'socks5') {
       const server = net.createServer((socket) => {
         void this.handleSocks5Connection(socket);
@@ -630,7 +630,7 @@ export class ProxyServer {
       server.listen(this.config.port, this.config.host, () => {
         this.log(`SOCKS5 proxy listening on socks5://${this.config.host}:${this.config.port}`);
       });
-      return;
+      return server;
     }
 
     const handler = (req: IncomingMessage, res: ServerResponse) => {
@@ -665,5 +665,7 @@ export class ProxyServer {
       this.log(`${this.config.protocol.toUpperCase()} proxy listening on ${this.config.protocol}://${this.config.host}:${this.config.port}`);
       this.log(`Log directory: ${path.resolve(this.config.logDir)}`);
     });
+
+    return server;
   }
 }

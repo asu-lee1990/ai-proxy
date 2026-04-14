@@ -17,6 +17,14 @@ npm install
 npm run build
 ```
 
+## 测试
+
+```bash
+npm test
+```
+
+这会先执行 TypeScript 编译，再跑配置、日志和代理转发的单元 / 集成测试。
+
 ## 启动
 
 ### HTTP 代理
