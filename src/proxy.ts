@@ -10,6 +10,7 @@ import tls from 'tls';
 import { Duplex } from 'stream';
 import { normalizeConfig, ProxyConfig } from './config';
 import { HeaderMap, Logger } from './logger';
+import { formatTunSummary, TunMonitor } from './tun';
 
 interface HeaderOverrides {
   [key: string]: string;
@@ -515,7 +516,7 @@ function formatDuration(ms: number): string {
 
 interface ProxyEvent {
   at: string;
-  kind: 'request' | 'response' | 'connect' | 'upgrade' | 'socks5' | 'status' | 'error';
+  kind: 'request' | 'response' | 'connect' | 'upgrade' | 'socks5' | 'status' | 'error' | 'tun';
   target: string;
   summary: string;
 }
@@ -538,6 +539,7 @@ export class ProxyServer {
     upgrades: 0,
     socks5: 0,
     transparent: 0,
+    tunPackets: 0,
     mitm: 0,
   };
 
@@ -588,6 +590,7 @@ export class ProxyServer {
       authEnabled: Boolean(this.config.authUser || this.config.authPass),
       mitmEnabled: Boolean(this.config.mitmEnabled),
       transparentEnabled: this.config.protocol === 'transparent',
+      tunEnabled: this.config.protocol === 'tun',
       stats: this.stats,
       recentEvents: this.recentEvents,
     };
@@ -637,6 +640,7 @@ export class ProxyServer {
         ['认证', data.authEnabled ? 'enabled' : 'disabled'],
         ['MITM', data.mitmEnabled ? 'enabled' : 'disabled'],
         ['透明代理', data.transparentEnabled ? 'enabled' : 'disabled'],
+        ['TUN', data.tunEnabled ? 'enabled' : 'disabled'],
         ['请求数', data.stats.requests],
         ['响应数', data.stats.responses],
         ['错误数', data.stats.errors],
@@ -645,6 +649,7 @@ export class ProxyServer {
         ['UPGRADE', data.stats.upgrades],
         ['SOCKS5', data.stats.socks5],
         ['透明连接', data.stats.transparent],
+        ['TUN 包', data.stats.tunPackets],
       ];
       for (const [label, value] of fields) {
         const item = document.createElement('div');
@@ -992,6 +997,37 @@ export class ProxyServer {
       this.log(`[TRANSPARENT] ${message}`);
       clientSocket.destroy(error as Error);
     }
+  }
+
+  private startTunMode(): net.Server {
+    const tunFdValue = this.config.tunFd ?? Number.parseInt(process.env.TUN_FD || '', 10);
+    if (!Number.isInteger(tunFdValue) || tunFdValue < 0) {
+      throw new Error('TUN mode requires a valid TUN_FD environment variable or --tun-fd');
+    }
+
+    const tunIface = process.env.TUN_IFACE || 'tun0';
+    const tunMonitor = new TunMonitor(tunFdValue, this.config.tunBufferSize ?? 65535);
+
+    tunMonitor.on('packet', (summary) => {
+      this.stats.tunPackets += 1;
+      this.recordEvent('tun', `${summary.src} -> ${summary.dst}`, formatTunSummary(summary));
+      this.log(`[TUN] ${formatTunSummary(summary)}`);
+    });
+
+    tunMonitor.on('unknown', () => {
+      this.stats.errors += 1;
+    });
+
+    void tunMonitor.start().catch((error: Error) => {
+      this.stats.errors += 1;
+      this.recordEvent('error', tunIface, error.message);
+      this.log(`[TUN] ${error.message}`);
+    });
+
+    const server = new net.Server();
+    server.unref();
+    this.log(`TUN monitor attached to fd=${tunFdValue} iface=${tunIface}`);
+    return server;
   }
 
   private handleMitmConnect(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
@@ -1385,6 +1421,8 @@ export class ProxyServer {
         this.httpAgent.destroy();
         this.httpsAgent.destroy();
       });
+    } else if (this.config.protocol === 'tun') {
+      return this.startTunMode();
     } else {
       server = requestServer;
     }

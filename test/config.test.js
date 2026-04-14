@@ -25,6 +25,8 @@ test('normalizeConfig applies safe defaults', () => {
     mitmCacheDir: './ssl/mitm-cache',
     transparentHttpPort: 80,
     transparentTlsPort: 443,
+    tunFd: undefined,
+    tunBufferSize: 65535,
     requestHeaders: [],
     responseHeaders: [],
     timeoutMs: 30000,

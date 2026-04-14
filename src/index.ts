@@ -33,10 +33,10 @@ function parsePositiveInteger(value: string, label: string): number {
 }
 
 function parseProtocol(value: string): ProxyProtocol {
-  if (value === 'http' || value === 'https' || value === 'socks5' || value === 'transparent') {
+  if (value === 'http' || value === 'https' || value === 'socks5' || value === 'transparent' || value === 'tun') {
     return value;
   }
-  throw new Error(`Invalid protocol: ${value}. Use http, https, socks5, or transparent.`);
+  throw new Error(`Invalid protocol: ${value}. Use http, https, socks5, transparent, or tun.`);
 }
 
 function mergeConfig(base: ProxyConfig, overrides: Partial<ProxyConfig>): ProxyConfig {
@@ -55,7 +55,7 @@ program
   .option('-c, --config <path>', 'Path to a JSON config file')
   .option('--host <host>', 'Listen host')
   .option('--port <port>', 'Listen port', parsePort)
-  .option('--protocol <protocol>', 'http, https, socks5, or transparent', parseProtocol)
+  .option('--protocol <protocol>', 'http, https, socks5, transparent, or tun', parseProtocol)
   .option('--log-dir <path>', 'Log directory')
   .option('--auth-user <user>', 'Authentication username')
   .option('--auth-pass <pass>', 'Authentication password')
@@ -68,6 +68,8 @@ program
   .option('--mitm-cache-dir <path>', 'Directory used to cache generated MITM leaf certificates')
   .option('--transparent-http-port <port>', 'Fallback upstream port for transparent HTTP mode', parsePort)
   .option('--transparent-tls-port <port>', 'Fallback upstream port for transparent TLS mode', parsePort)
+  .option('--tun-fd <fd>', 'Open TUN file descriptor inherited from helper', parsePort)
+  .option('--tun-buffer-size <bytes>', 'Read buffer size for TUN packets', parsePort)
   .option('--request-header <header>', 'Add an upstream request header, key=value', collect, [])
   .option('--response-header <header>', 'Inject a header into proxy responses, key=value', collect, [])
   .option('--timeout-ms <ms>', 'Upstream timeout in milliseconds', parseMilliseconds)
@@ -99,6 +101,8 @@ const mergedConfig = mergeConfig(baseConfig, {
   mitmCacheDir: options.mitmCacheDir,
   transparentHttpPort: options.transparentHttpPort,
   transparentTlsPort: options.transparentTlsPort,
+  tunFd: options.tunFd,
+  tunBufferSize: options.tunBufferSize,
   requestHeaders: options.requestHeader,
   responseHeaders: options.responseHeader,
   timeoutMs: options.timeoutMs,

@@ -102,10 +102,16 @@ npm start -- \
 - root 权限（或能执行 `iptables`）
 - 已安装 `iptables`
 - 已安装 `gcc`（如果要编译 `tun-helper.c`）
-- `ai-proxy` 已在本机启动透明模式，例如：
+- `ai-proxy` 已在本机启动透明/TUN 模式，例如：
 
 ```bash
 npm start -- --protocol transparent --host 127.0.0.1 --port 8080
+```
+
+如果你要跑真正的 kernel TUN helper，可以用：
+
+```bash
+sudo ./scripts/tun-run.sh --iface ai0 -- npm start -- --protocol tun
 ```
 
 如果要解密 HTTPS CONNECT 或透明 TLS，可以再加：
