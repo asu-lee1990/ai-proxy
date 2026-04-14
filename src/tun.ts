@@ -301,6 +301,10 @@ export class TunSessionManager extends EventEmitter {
     return Array.from(this.sessions.values()).map(cloneSession);
   }
 
+  deleteSession(id: string): boolean {
+    return this.sessions.delete(id);
+  }
+
   processPacket(summary: TunPacketSummary, payload: Buffer): TunSessionEvent | null {
     if (summary.family !== 'ipv4' || summary.protocol !== 6 || summary.srcPort === undefined || summary.dstPort === undefined) {
       return null;
@@ -435,9 +439,18 @@ export class TunMonitor extends EventEmitter {
 export class TunTcpBridge extends EventEmitter {
   private readonly sessionManager = new TunSessionManager();
   private readonly flows = new Map<string, TunTcpBridgeFlow>();
+  private readonly idleTimeoutMs: number;
+  private readonly sweepIntervalMs: number;
+  private readonly sweepTimer: NodeJS.Timeout;
 
-  constructor(private readonly fd: number) {
+  constructor(private readonly fd: number, options: { idleTimeoutMs?: number; sweepIntervalMs?: number } = {}) {
     super();
+    this.idleTimeoutMs = options.idleTimeoutMs ?? 60_000;
+    this.sweepIntervalMs = options.sweepIntervalMs ?? Math.min(30_000, this.idleTimeoutMs);
+    this.sweepTimer = setInterval(() => {
+      this.evictIdleFlows();
+    }, this.sweepIntervalMs);
+    this.sweepTimer.unref();
   }
 
   get activeSessions(): number {
@@ -449,6 +462,7 @@ export class TunTcpBridge extends EventEmitter {
   }
 
   handlePacket(summary: TunPacketSummary, packet: Buffer): void {
+    this.evictIdleFlows();
     if (summary.family !== 'ipv4' || summary.protocol !== 6 || summary.srcPort === undefined || summary.dstPort === undefined) {
       return;
     }
@@ -501,10 +515,22 @@ export class TunTcpBridge extends EventEmitter {
   }
 
   close(): void {
-    for (const flow of this.flows.values()) {
-      flow.socket?.destroy();
+    clearInterval(this.sweepTimer);
+    for (const id of Array.from(this.flows.keys())) {
+      this.closeFlow(id);
     }
-    this.flows.clear();
+  }
+
+  evictIdleFlows(now = Date.now()): number {
+    let evicted = 0;
+    for (const [id, flow] of this.flows.entries()) {
+      if (now - flow.lastSeenAt <= this.idleTimeoutMs) {
+        continue;
+      }
+      this.closeFlow(id);
+      evicted += 1;
+    }
+    return evicted;
   }
 
   private ensureFlow(summary: TunPacketSummary): TunTcpBridgeFlow {
@@ -604,10 +630,12 @@ export class TunTcpBridge extends EventEmitter {
   private closeFlow(id: string): void {
     const flow = this.flows.get(id);
     if (!flow) {
+      this.sessionManager.deleteSession(id);
       return;
     }
     flow.closed = true;
     flow.socket?.destroy();
     this.flows.delete(id);
+    this.sessionManager.deleteSession(id);
   }
 }

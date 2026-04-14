@@ -138,6 +138,50 @@ test('TunTcpBridge advances sequence numbers once per segment', async () => {
     assert.deepEqual(finAck.flags, ['FIN', 'ACK']);
     assert.equal(ackOnly.sequence, synAck.sequence + 1);
     assert.equal(endCalls, 1);
+    bridge.close();
+  } finally {
+    fs.write = originalWrite;
+    net.connect = originalConnect;
+  }
+});
+
+test('TunTcpBridge evicts idle flows', () => {
+  const originalWrite = fs.write;
+  const originalConnect = net.connect;
+
+  fs.write = (fd, buffer, offset, length, position, callback) => {
+    if (typeof callback === 'function') {
+      callback(null, length, buffer);
+    }
+  };
+
+  net.connect = () => {
+    const socket = new events.EventEmitter();
+    socket.write = () => true;
+    socket.destroy = () => {};
+    socket.end = () => {};
+    socket.setNoDelay = () => {};
+    socket.setKeepAlive = () => {};
+    socket.pause = () => {};
+    socket.resume = () => {};
+    socket.unref = () => {};
+    queueMicrotask(() => socket.emit('connect'));
+    return socket;
+  };
+
+  try {
+    const bridge = new TunTcpBridge(42, { idleTimeoutMs: 1, sweepIntervalMs: 1000 });
+    const synPacket = buildIpv4TcpPacket(0x02, '');
+    const synSummary = parseIpv4Packet(synPacket);
+    assert.ok(synSummary);
+
+    bridge.handlePacket(synSummary, synPacket);
+    assert.equal(bridge.snapshot().length, 1);
+
+    const evicted = bridge.evictIdleFlows(Date.now() + 10_000);
+    assert.equal(evicted, 1);
+    assert.equal(bridge.snapshot().length, 0);
+    bridge.close();
   } finally {
     fs.write = originalWrite;
     net.connect = originalConnect;
