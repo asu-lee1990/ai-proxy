@@ -473,7 +473,6 @@ export class TunTcpBridge extends EventEmitter {
       flow.clientAck = u32((summary.sequence ?? 0) + 1);
       flow.serverSeq = randomU32();
       this.sendTcpPacket(flow, ['SYN', 'ACK'], Buffer.alloc(0), flow.clientAck);
-      flow.serverSeq = u32(flow.serverSeq + 1);
       return;
     }
 
@@ -541,7 +540,6 @@ export class TunTcpBridge extends EventEmitter {
           return;
         }
         this.sendTcpPacket(flow, ['PSH', 'ACK'], Buffer.from(chunk), flow.clientAck);
-        flow.serverSeq = u32(flow.serverSeq + chunk.length);
       });
       socket.on('close', () => {
         flow.connected = false;

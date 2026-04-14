@@ -1,7 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const events = require('node:events');
+const fs = require('node:fs');
+const net = require('node:net');
 
-const { parseIpv4Packet, formatTunSummary, TunSessionManager } = require('../dist/tun');
+const { parseIpv4Packet, formatTunSummary, TunSessionManager, TunTcpBridge } = require('../dist/tun');
 
 function buildIpv4TcpPacket(flags = 0x18, payload = 'hello') {
   const packet = Buffer.alloc(20 + 20 + Buffer.byteLength(payload));
@@ -73,4 +76,57 @@ test('TunSessionManager tracks TCP sessions', () => {
   assert.equal(manager.activeCount, 1);
   assert.equal(update.session.state, 'established');
   assert.equal(update.session.bytesFromClient, 4);
+});
+
+test('TunTcpBridge advances sequence numbers once per segment', async () => {
+  const originalWrite = fs.write;
+  const originalConnect = net.connect;
+  const writes = [];
+
+  fs.write = (fd, buffer, offset, length, position, callback) => {
+    const slice = Buffer.from(buffer.subarray(offset, offset + length));
+    writes.push(slice);
+    if (typeof callback === 'function') {
+      callback(null, length, buffer);
+    }
+  };
+
+  net.connect = () => {
+    const socket = new events.EventEmitter();
+    socket.write = () => true;
+    socket.destroy = () => {};
+    socket.setNoDelay = () => {};
+    socket.setKeepAlive = () => {};
+    socket.pause = () => {};
+    socket.resume = () => {};
+    socket.unref = () => {};
+    queueMicrotask(() => socket.emit('connect'));
+    return socket;
+  };
+
+  try {
+    const bridge = new TunTcpBridge(42);
+    const synPacket = buildIpv4TcpPacket(0x02, '');
+    const dataPacket = buildIpv4TcpPacket(0x18, 'ping');
+    const synSummary = parseIpv4Packet(synPacket);
+    const dataSummary = parseIpv4Packet(dataPacket);
+
+    assert.ok(synSummary);
+    assert.ok(dataSummary);
+
+    bridge.handlePacket(synSummary, synPacket);
+    bridge.handlePacket(dataSummary, dataPacket);
+
+    assert.equal(writes.length >= 2, true);
+    const synAck = parseIpv4Packet(writes[0]);
+    const ackOnly = parseIpv4Packet(writes[1]);
+    assert.ok(synAck);
+    assert.ok(ackOnly);
+    assert.deepEqual(synAck.flags, ['SYN', 'ACK']);
+    assert.deepEqual(ackOnly.flags, ['ACK']);
+    assert.equal(ackOnly.sequence, synAck.sequence + 1);
+  } finally {
+    fs.write = originalWrite;
+    net.connect = originalConnect;
+  }
 });
