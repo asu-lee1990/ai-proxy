@@ -88,6 +88,43 @@ test('HTTP proxy forwards absolute-form requests', async () => {
   }
 });
 
+
+test('HTTP proxy serves a status UI and JSON payload', async () => {
+  const root = tempDir('ai-proxy-status-');
+  const logDir = path.join(root, 'log');
+  const proxy = await createProxyServer('http', logDir);
+
+  try {
+    const proxyPort = getPort(proxy);
+
+    const html = await httpRequest({
+      host: '127.0.0.1',
+      port: proxyPort,
+      method: 'GET',
+      path: '/status',
+    });
+
+    assert.equal(html.statusCode, 200);
+    assert.match(html.body, /ai-proxy 状态页/);
+
+    const json = await httpRequest({
+      host: '127.0.0.1',
+      port: proxyPort,
+      method: 'GET',
+      path: '/status.json',
+      headers: { accept: 'application/json' },
+    });
+
+    assert.equal(json.statusCode, 200);
+    const payload = JSON.parse(json.body);
+    assert.equal(payload.service, 'ai-proxy');
+    assert.equal(payload.protocol, 'http');
+    assert.ok(Array.isArray(payload.recentEvents));
+  } finally {
+    await closeServer(proxy);
+  }
+});
+
 test('SOCKS5 proxy tunnels TCP traffic', async () => {
   const root = tempDir('ai-proxy-socks-');
   const logDir = path.join(root, 'log');

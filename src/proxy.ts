@@ -284,6 +284,38 @@ function captureBodyBuffer(state: BodyCaptureState): Buffer {
   return state.bytes > 0 ? Buffer.concat(state.chunks, state.bytes) : Buffer.alloc(0);
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  const seconds = ms / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+  const minutes = seconds / 60;
+  if (minutes < 60) {
+    return `${minutes.toFixed(1)}m`;
+  }
+  const hours = minutes / 60;
+  return `${hours.toFixed(1)}h`;
+}
+
+interface ProxyEvent {
+  at: string;
+  kind: 'request' | 'response' | 'connect' | 'upgrade' | 'socks5' | 'status' | 'error';
+  target: string;
+  summary: string;
+}
+
 export class ProxyServer {
   private readonly config: ProxyConfig;
   private readonly logger: Logger;
@@ -291,6 +323,16 @@ export class ProxyServer {
   private readonly responseOverrides: HeaderOverrides;
   private readonly httpAgent: http.Agent;
   private readonly httpsAgent: https.Agent;
+  private readonly startedAt = Date.now();
+  private readonly recentEvents: ProxyEvent[] = [];
+  private readonly stats = {
+    requests: 0,
+    responses: 0,
+    errors: 0,
+    connects: 0,
+    upgrades: 0,
+    socks5: 0,
+  };
 
   constructor(config: ProxyConfig) {
     this.config = normalizeConfig(config);
@@ -305,6 +347,135 @@ export class ProxyServer {
     if (!this.config.quiet) {
       console.log(message);
     }
+  }
+
+  private recordEvent(kind: ProxyEvent['kind'], target: string, summary: string): void {
+    this.recentEvents.unshift({ at: new Date().toISOString(), kind, target, summary });
+    if (this.recentEvents.length > 10) {
+      this.recentEvents.pop();
+    }
+  }
+
+  private buildStatusData(): Record<string, unknown> {
+    return {
+      service: 'ai-proxy',
+      protocol: this.config.protocol,
+      host: this.config.host,
+      port: this.config.port,
+      uptimeMs: Date.now() - this.startedAt,
+      uptime: formatDuration(Date.now() - this.startedAt),
+      logDir: path.resolve(this.config.logDir),
+      bodyCaptureLimitBytes: this.config.bodyCaptureLimitBytes,
+      authEnabled: Boolean(this.config.authUser || this.config.authPass),
+      stats: this.stats,
+      recentEvents: this.recentEvents,
+    };
+  }
+
+  private renderStatusHtml(): string {
+    const status = this.buildStatusData();
+    return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ai-proxy status</title>
+  <style>
+    body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; margin: 24px; background: #0b1020; color: #e5e7eb; }
+    .card { max-width: 960px; background: #111827; border: 1px solid #243041; border-radius: 16px; padding: 20px; box-shadow: 0 8px 30px rgba(0,0,0,.25); }
+    h1 { margin-top: 0; font-size: 24px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 16px 0; }
+    .item { background: #0f172a; border: 1px solid #1f2937; border-radius: 12px; padding: 12px; }
+    .label { color: #94a3b8; font-size: 12px; margin-bottom: 6px; }
+    .value { font-size: 18px; word-break: break-word; }
+    pre { background: #0f172a; border: 1px solid #1f2937; border-radius: 12px; padding: 12px; overflow: auto; }
+    a { color: #93c5fd; }
+    .muted { color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>ai-proxy 状态页</h1>
+    <div class="muted">自动刷新：每 3 秒</div>
+    <div class="grid" id="stats"></div>
+    <h2>最近事件</h2>
+    <pre id="events">${escapeHtml(JSON.stringify(status.recentEvents, null, 2))}</pre>
+    <p><a href="/status.json">查看 JSON</a></p>
+  </div>
+  <script>
+    const render = (data) => {
+      const stats = document.getElementById('stats');
+      stats.innerHTML = '';
+      const fields = [
+        ['服务', data.service],
+        ['协议', data.protocol],
+        ['监听', data.host + ':' + data.port],
+        ['运行时长', data.uptime],
+        ['日志目录', data.logDir],
+        ['Body 上限', String(data.bodyCaptureLimitBytes) + ' bytes'],
+        ['认证', data.authEnabled ? 'enabled' : 'disabled'],
+        ['请求数', data.stats.requests],
+        ['响应数', data.stats.responses],
+        ['错误数', data.stats.errors],
+        ['CONNECT', data.stats.connects],
+        ['UPGRADE', data.stats.upgrades],
+        ['SOCKS5', data.stats.socks5],
+      ];
+      for (const [label, value] of fields) {
+        const item = document.createElement('div');
+        item.className = 'item';
+        item.innerHTML = '<div class="label">' + label + '</div><div class="value">' + String(value) + '</div>';
+        stats.appendChild(item);
+      }
+      document.getElementById('events').textContent = JSON.stringify(data.recentEvents, null, 2);
+    };
+
+    const refresh = async () => {
+      const res = await fetch('/status.json', { cache: 'no-store' });
+      render(await res.json());
+    };
+
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>`;
+  }
+
+  private resolveStatusFormat(req: IncomingMessage): 'html' | 'json' | null {
+    const rawUrl = req.url ?? '';
+    if (/^https?:\/\//i.test(rawUrl)) {
+      return null;
+    }
+
+    const pathname = rawUrl.split('?', 1)[0];
+    if (pathname === '/status.json' || pathname === '/__proxy/status.json') {
+      return 'json';
+    }
+    if (pathname === '/status' || pathname === '/__proxy/status') {
+      return 'html';
+    }
+    return null;
+  }
+
+  private sendStatusResponse(req: IncomingMessage, res: ServerResponse): void {
+    const format = this.resolveStatusFormat(req);
+    if (!format) {
+      return;
+    }
+
+    const target = this.resolveTarget(req);
+    const targetHost = target ? `${target.hostname}${target.port ? `:${target.port}` : ''}` : 'local';
+    this.recordEvent('status', targetHost, 'served status page');
+
+    if (format === 'json') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(this.buildStatusData(), null, 2));
+      return;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(this.renderStatusHtml());
   }
 
   private authenticateProxy(headers: IncomingHttpHeaders): boolean {
@@ -378,6 +549,9 @@ export class ProxyServer {
     const client = target.protocol === 'https:' ? https : http;
     const agent = target.protocol === 'https:' ? this.httpsAgent : this.httpAgent;
 
+    this.stats.requests += 1;
+    this.recordEvent('request', targetHost, `${req.method ?? 'GET'} ${target.toString()}`);
+
     const upstreamReq = client.request(
       {
         protocol: target.protocol,
@@ -401,7 +575,9 @@ export class ProxyServer {
 
         upstreamRes.on('end', () => {
           res.end();
+          this.stats.responses += 1;
           const responseLine = formatStatusLine(upstreamRes.httpVersion, upstreamRes.statusCode, upstreamRes.statusMessage);
+          this.recordEvent('response', targetHost, responseLine);
           this.logger.logResponse(
             targetHost,
             responseLine,
@@ -418,6 +594,8 @@ export class ProxyServer {
     });
 
     upstreamReq.on('error', (error) => {
+      this.stats.errors += 1;
+      this.recordEvent('error', targetHost, (error as Error).message);
       if (!res.headersSent) {
         res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
       }
@@ -460,6 +638,8 @@ export class ProxyServer {
     const [hostname, portPart] = target.split(':');
     const port = Number.parseInt(portPart || '443', 10);
     const targetHost = `${hostname}:${port}`;
+    this.stats.connects += 1;
+    this.recordEvent('connect', targetHost, `CONNECT ${target}`);
     this.log(`[CONNECT] ${targetHost}`);
     this.logger.logRequest(targetHost, `CONNECT ${target} HTTP/${req.httpVersion}`, headersToObject(req.headers));
 
@@ -499,6 +679,9 @@ export class ProxyServer {
     const requestHeaders = this.buildUpstreamHeaders(req, target);
     const client = target.protocol === 'https:' ? https : http;
     const agent = target.protocol === 'https:' ? this.httpsAgent : this.httpAgent;
+
+    this.stats.upgrades += 1;
+    this.recordEvent('upgrade', targetHost, `${req.method ?? 'GET'} ${target.toString()}`);
 
     const upstreamReq = client.request(
       {
@@ -635,6 +818,8 @@ export class ProxyServer {
 
       const port = (await reader.read(2)).readUInt16BE(0);
       const targetHost = `${host}:${port}`;
+      this.stats.socks5 += 1;
+      this.recordEvent('socks5', targetHost, `CONNECT ${host}:${port}`);
       this.log(`[SOCKS5] CONNECT ${targetHost}`);
       this.logger.logRequest(targetHost, `SOCKS5 CONNECT ${host}:${port}`, { command: 'CONNECT' });
 
@@ -692,6 +877,11 @@ export class ProxyServer {
     const handler = (req: IncomingMessage, res: ServerResponse) => {
       if (!this.authenticateProxy(req.headers)) {
         this.sendProxyAuthRequired(res);
+        return;
+      }
+
+      if (this.resolveStatusFormat(req)) {
+        this.sendStatusResponse(req, res);
         return;
       }
 
