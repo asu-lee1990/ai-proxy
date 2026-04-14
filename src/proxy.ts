@@ -10,7 +10,7 @@ import tls from 'tls';
 import { Duplex } from 'stream';
 import { normalizeConfig, ProxyConfig } from './config';
 import { HeaderMap, Logger } from './logger';
-import { formatTunSummary, TunMonitor, TunTcpBridge } from './tun';
+import { formatTunSessionSummary, formatTunSummary, TunMonitor, TunTcpBridge } from './tun';
 
 interface HeaderOverrides {
   [key: string]: string;
@@ -581,6 +581,7 @@ export class ProxyServer {
 
   private buildStatusData(): Record<string, unknown> {
     const tunSessions = this.tunBridge?.summarizeSessions(8) ?? [];
+    const tunSessionLines = tunSessions.map(formatTunSessionSummary);
     return {
       service: 'ai-proxy',
       protocol: this.config.protocol,
@@ -596,6 +597,7 @@ export class ProxyServer {
       tunEnabled: this.config.protocol === 'tun',
       stats: this.stats,
       tunSessions,
+      tunSessionLines,
       recentEvents: this.recentEvents,
     };
   }
@@ -627,7 +629,7 @@ export class ProxyServer {
     <div class="muted">自动刷新：每 3 秒</div>
     <div class="grid" id="stats"></div>
     <h2>TUN 活跃会话</h2>
-    <pre id="sessions">${escapeHtml(JSON.stringify(status.tunSessions, null, 2))}</pre>
+    <pre id="sessions">${escapeHtml((status.tunSessionLines as string[] | undefined)?.join('\n') ?? '')}</pre>
     <h2>最近事件</h2>
     <pre id="events">${escapeHtml(JSON.stringify(status.recentEvents, null, 2))}</pre>
     <p><a href="/status.json">查看 JSON</a></p>
@@ -664,7 +666,7 @@ export class ProxyServer {
         item.innerHTML = '<div class="label">' + label + '</div><div class="value">' + String(value) + '</div>';
         stats.appendChild(item);
       }
-      document.getElementById('sessions').textContent = JSON.stringify(data.tunSessions, null, 2);
+      document.getElementById('sessions').textContent = Array.isArray(data.tunSessionLines) ? data.tunSessionLines.join('\n') : '';
       document.getElementById('events').textContent = JSON.stringify(data.recentEvents, null, 2);
     };
 

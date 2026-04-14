@@ -4,7 +4,7 @@ const events = require('node:events');
 const fs = require('node:fs');
 const net = require('node:net');
 
-const { parseIpv4Packet, formatTunSummary, TunSessionManager, TunTcpBridge } = require('../dist/tun');
+const { parseIpv4Packet, formatTunSessionSummary, formatTunSummary, TunSessionManager, TunTcpBridge } = require('../dist/tun');
 
 function buildIpv4TcpPacket(flags = 0x18, payload = 'hello') {
   const packet = Buffer.alloc(20 + 20 + Buffer.byteLength(payload));
@@ -76,6 +76,21 @@ test('TunSessionManager tracks TCP sessions', () => {
   assert.equal(manager.activeCount, 1);
   assert.equal(update.session.state, 'established');
   assert.equal(update.session.bytesFromClient, 4);
+});
+
+test('formatTunSessionSummary renders a compact single line', () => {
+  const manager = new TunSessionManager();
+  const synSummary = parseIpv4Packet(buildIpv4TcpPacket(0x02, ''));
+  assert.ok(synSummary);
+  manager.processPacket(synSummary, Buffer.alloc(0));
+  const summary = manager.summarize(1, Date.now() + 1500)[0];
+  assert.ok(summary);
+
+  const line = formatTunSessionSummary(summary);
+  assert.match(line, /10\.0\.0\.1:54321 -> 1\.1\.1\.1:443/);
+  assert.match(line, /syn-sent/);
+  assert.match(line, /p1/);
+  assert.match(line, /age=1\.5s/);
 });
 
 test('TunTcpBridge advances sequence numbers once per segment', async () => {

@@ -303,6 +303,27 @@ function cloneSession(session: TunTcpSession): TunTcpSession {
   };
 }
 
+function formatCompactDuration(ms: number): string {
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  const seconds = ms / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+  const minutes = seconds / 60;
+  if (minutes < 60) {
+    return `${minutes.toFixed(1)}m`;
+  }
+  const hours = minutes / 60;
+  return `${hours.toFixed(1)}h`;
+}
+
+export function formatTunSessionSummary(summary: TunTcpSessionSummary): string {
+  const flags = summary.lastFlags.length > 0 ? ` flags=${summary.lastFlags.join(',')}` : '';
+  return `${summary.client} -> ${summary.server} ${summary.state} p${summary.packets} c${summary.bytesFromClient}/s${summary.bytesFromServer} age=${formatCompactDuration(summary.ageMs)}${flags}`;
+}
+
 export class TunSessionManager extends EventEmitter {
   private readonly sessions = new Map<string, TunTcpSession>();
 
