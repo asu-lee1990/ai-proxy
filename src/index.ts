@@ -61,6 +61,11 @@ program
   .option('--auth-pass <pass>', 'Authentication password')
   .option('--tls-key <path>', 'TLS private key path for HTTPS listener')
   .option('--tls-cert <path>', 'TLS certificate path for HTTPS listener')
+  .option('--mitm', 'Enable HTTPS CONNECT MITM decryption', false)
+  .option('--mitm-insecure-upstream', 'Disable upstream certificate verification while MITM is enabled')
+  .option('--mitm-ca-key <path>', 'CA private key path for MITM leaf signing')
+  .option('--mitm-ca-cert <path>', 'CA certificate path for MITM leaf signing')
+  .option('--mitm-cache-dir <path>', 'Directory used to cache generated MITM leaf certificates')
   .option('--request-header <header>', 'Add an upstream request header, key=value', collect, [])
   .option('--response-header <header>', 'Inject a header into proxy responses, key=value', collect, [])
   .option('--timeout-ms <ms>', 'Upstream timeout in milliseconds', parseMilliseconds)
@@ -85,6 +90,11 @@ const mergedConfig = mergeConfig(baseConfig, {
   authPass: options.authPass,
   tlsKeyPath: options.tlsKey,
   tlsCertPath: options.tlsCert,
+  mitmEnabled: options.mitm,
+  mitmInsecureUpstream: options.mitmInsecureUpstream,
+  mitmCaKeyPath: options.mitmCaKey,
+  mitmCaCertPath: options.mitmCaCert,
+  mitmCacheDir: options.mitmCacheDir,
   requestHeaders: options.requestHeader,
   responseHeaders: options.responseHeader,
   timeoutMs: options.timeoutMs,

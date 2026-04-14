@@ -1,7 +1,10 @@
 import fs from 'fs';
+import { execFileSync } from 'child_process';
+import crypto from 'crypto';
 import http, { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'http';
 import https from 'https';
 import net from 'net';
+import os from 'os';
 import path from 'path';
 import tls from 'tls';
 import { Duplex } from 'stream';
@@ -178,7 +181,7 @@ function defaultTlsCertPath(): string {
   return path.resolve(__dirname, '../ssl/ca.cert.pem');
 }
 
-function formatRequestTarget(req: IncomingMessage): URL | null {
+function formatRequestTarget(req: IncomingMessage, baseUrl?: URL): URL | null {
   const rawUrl = req.url ?? '';
   if (!rawUrl) {
     return null;
@@ -192,16 +195,24 @@ function formatRequestTarget(req: IncomingMessage): URL | null {
     return null;
   }
 
-  const host = req.headers.host;
-  if (!host) {
-    return null;
+  if (baseUrl) {
+    try {
+      return new URL(rawUrl, baseUrl);
+    } catch {
+      return null;
+    }
   }
 
-  try {
-    return new URL(rawUrl, `http://${host}`);
-  } catch {
-    return null;
+  const host = req.headers.host;
+  if (host) {
+    try {
+      return new URL(rawUrl, `http://${host}`);
+    } catch {
+      return null;
+    }
   }
+
+  return null;
 }
 
 function basicAuthHeader(user: string, pass: string): string {
@@ -244,6 +255,104 @@ function addressToSocksReply(address: string, family: string | undefined, port: 
   host.copy(reply, 4);
   reply.writeUInt16BE(port, 4 + host.length);
   return reply;
+}
+
+function isIpv4Address(hostname: string): boolean {
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname);
+}
+
+function isIpv6Address(hostname: string): boolean {
+  return hostname.includes(':');
+}
+
+function sanitizeCertificateName(hostname: string): string {
+  return hostname.replace(/[^a-zA-Z0-9._-]+/g, '_');
+}
+
+function buildOpenSslAltName(hostname: string): string {
+  if (isIpv4Address(hostname) || isIpv6Address(hostname)) {
+    return `IP.1 = ${hostname}`;
+  }
+  return `DNS.1 = ${hostname}`;
+}
+
+class MitmCertificateAuthority {
+  private readonly caKeyPath: string;
+  private readonly caCertPath: string;
+  private readonly cacheDir: string;
+
+  constructor(caKeyPath: string, caCertPath: string, cacheDir: string) {
+    this.caKeyPath = resolveMaybeRelative(caKeyPath);
+    this.caCertPath = resolveMaybeRelative(caCertPath);
+    this.cacheDir = resolveMaybeRelative(cacheDir);
+    fs.mkdirSync(this.cacheDir, { recursive: true });
+  }
+
+  private ensureCaFiles(): void {
+    if (!fs.existsSync(this.caKeyPath)) {
+      throw new Error(`MITM CA key not found: ${this.caKeyPath}`);
+    }
+    if (!fs.existsSync(this.caCertPath)) {
+      throw new Error(`MITM CA certificate not found: ${this.caCertPath}`);
+    }
+  }
+
+  private leafPaths(hostname: string): { keyPath: string; certPath: string; csrPath: string; extPath: string } {
+    const safe = sanitizeCertificateName(hostname);
+    const base = path.join(this.cacheDir, safe);
+    return {
+      keyPath: `${base}.key.pem`,
+      certPath: `${base}.cert.pem`,
+      csrPath: `${base}.csr.pem`,
+      extPath: `${base}.ext.cnf`,
+    };
+  }
+
+  private generateLeaf(hostname: string): { keyPath: string; certPath: string } {
+    this.ensureCaFiles();
+    const { keyPath, certPath, csrPath, extPath } = this.leafPaths(hostname);
+    if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
+      const extContent = [
+        '[v3_req]',
+        'basicConstraints = CA:FALSE',
+        'keyUsage = digitalSignature, keyEncipherment',
+        'extendedKeyUsage = serverAuth',
+        'subjectAltName = @alt_names',
+        '',
+        '[alt_names]',
+        buildOpenSslAltName(hostname),
+        '',
+      ].join('\n');
+      fs.writeFileSync(extPath, extContent, 'utf8');
+      try {
+        execFileSync(
+          'openssl',
+          ['req', '-new', '-nodes', '-newkey', 'rsa:2048', '-keyout', keyPath, '-out', csrPath, '-subj', `/CN=${hostname}`],
+          { stdio: 'pipe' },
+        );
+        execFileSync(
+          'openssl',
+          ['x509', '-req', '-in', csrPath, '-CA', this.caCertPath, '-CAkey', this.caKeyPath, '-CAcreateserial', '-out', certPath, '-days', '825', '-sha256', '-extfile', extPath, '-extensions', 'v3_req'],
+          { stdio: 'pipe', cwd: this.cacheDir },
+        );
+      } finally {
+        for (const file of [csrPath]) {
+          if (fs.existsSync(file)) {
+            fs.unlinkSync(file);
+          }
+        }
+      }
+    }
+    return { keyPath, certPath };
+  }
+
+  getSecureContext(hostname: string): tls.SecureContext {
+    const { keyPath, certPath } = this.generateLeaf(hostname);
+    return tls.createSecureContext({
+      key: fs.readFileSync(keyPath),
+      cert: fs.readFileSync(certPath),
+    });
+  }
 }
 
 interface BodyCaptureState {
@@ -323,6 +432,7 @@ export class ProxyServer {
   private readonly responseOverrides: HeaderOverrides;
   private readonly httpAgent: http.Agent;
   private readonly httpsAgent: https.Agent;
+  private readonly mitmAuthority?: MitmCertificateAuthority;
   private readonly startedAt = Date.now();
   private readonly recentEvents: ProxyEvent[] = [];
   private readonly stats = {
@@ -332,6 +442,7 @@ export class ProxyServer {
     connects: 0,
     upgrades: 0,
     socks5: 0,
+    mitm: 0,
   };
 
   constructor(config: ProxyConfig) {
@@ -340,7 +451,19 @@ export class ProxyServer {
     this.requestOverrides = parseHeaderOverrides(this.config.requestHeaders);
     this.responseOverrides = parseHeaderOverrides(this.config.responseHeaders);
     this.httpAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
-    this.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
+
+    if (this.config.mitmEnabled) {
+      const mitmCaCertPath = resolveMaybeRelative(this.config.mitmCaCertPath ?? defaultTlsCertPath());
+      const httpsAgentOptions: https.AgentOptions = { keepAlive: true, maxSockets: 64, ca: fs.readFileSync(mitmCaCertPath, 'utf8') };
+      this.httpsAgent = new https.Agent(httpsAgentOptions);
+      this.mitmAuthority = new MitmCertificateAuthority(
+        this.config.mitmCaKeyPath ?? defaultTlsKeyPath(),
+        mitmCaCertPath,
+        this.config.mitmCacheDir ?? './ssl/mitm-cache',
+      );
+    } else {
+      this.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
+    }
   }
 
   private log(message: string): void {
@@ -367,6 +490,7 @@ export class ProxyServer {
       logDir: path.resolve(this.config.logDir),
       bodyCaptureLimitBytes: this.config.bodyCaptureLimitBytes,
       authEnabled: Boolean(this.config.authUser || this.config.authPass),
+      mitmEnabled: Boolean(this.config.mitmEnabled),
       stats: this.stats,
       recentEvents: this.recentEvents,
     };
@@ -414,10 +538,12 @@ export class ProxyServer {
         ['日志目录', data.logDir],
         ['Body 上限', String(data.bodyCaptureLimitBytes) + ' bytes'],
         ['认证', data.authEnabled ? 'enabled' : 'disabled'],
+        ['MITM', data.mitmEnabled ? 'enabled' : 'disabled'],
         ['请求数', data.stats.requests],
         ['响应数', data.stats.responses],
         ['错误数', data.stats.errors],
         ['CONNECT', data.stats.connects],
+        ['MITM', data.stats.mitm],
         ['UPGRADE', data.stats.upgrades],
         ['SOCKS5', data.stats.socks5],
       ];
@@ -523,8 +649,8 @@ export class ProxyServer {
     res.end('Proxy authentication required');
   }
 
-  private resolveTarget(req: IncomingMessage): URL | null {
-    return formatRequestTarget(req);
+  private resolveTarget(req: IncomingMessage, baseUrl?: URL): URL | null {
+    return formatRequestTarget(req, baseUrl);
   }
 
   private applyResponseOverrides(headers: IncomingHttpHeaders): HeaderMap {
@@ -557,11 +683,15 @@ export class ProxyServer {
         protocol: target.protocol,
         hostname: target.hostname,
         port: target.port || undefined,
+        servername: target.hostname,
         method: req.method,
         path: `${target.pathname}${target.search}` || '/',
         headers: requestHeaders,
         timeout: this.config.timeoutMs,
         agent,
+        ...(target.protocol === 'https:' && this.config.mitmEnabled && this.config.mitmInsecureUpstream
+          ? { rejectUnauthorized: false }
+          : {}),
       },
       (upstreamRes) => {
         const responseHeaders = this.applyResponseOverrides(upstreamRes.headers);
@@ -625,7 +755,83 @@ export class ProxyServer {
     });
   }
 
+  private handleMitmConnect(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
+    if (!this.mitmAuthority) {
+      this.handleConnect(req, clientSocket, head);
+      return;
+    }
+
+    if (!this.authenticateProxy(req.headers)) {
+      clientSocket.write(
+        'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="ai-proxy"\r\n\r\n',
+      );
+      clientSocket.destroy();
+      return;
+    }
+
+    const target = req.url ?? '';
+    const [hostname, portPart] = target.split(':');
+    const port = Number.parseInt(portPart || '443', 10);
+    const targetHost = `${hostname}:${port}`;
+    const baseTarget = new URL(`https://${targetHost}`);
+
+    this.stats.connects += 1;
+    this.stats.mitm += 1;
+    this.recordEvent('connect', targetHost, `CONNECT ${target} [MITM]`);
+    this.log(`[CONNECT-MITM] ${targetHost}`);
+    this.logger.logRequest(targetHost, `CONNECT ${target} HTTP/${req.httpVersion}`, headersToObject(req.headers));
+
+    clientSocket.write('HTTP/1.1 200 Connection Established\r\nProxy-Agent: ai-proxy\r\n\r\n');
+    if (head.length > 0 && typeof clientSocket.unshift === 'function') {
+      clientSocket.unshift(head);
+    }
+
+    const secureContext = this.mitmAuthority.getSecureContext(hostname);
+    const tlsSocket = new tls.TLSSocket(clientSocket as net.Socket, {
+      isServer: true,
+      secureContext,
+      ALPNProtocols: ['http/1.1'],
+    });
+
+    let started = false;
+    const onSecure = () => {
+      if (started) {
+        return;
+      }
+      started = true;
+
+      const httpServer = http.createServer((innerReq, innerRes) => {
+        const upstreamTarget = this.resolveTarget(innerReq, baseTarget);
+        if (!upstreamTarget) {
+          innerRes.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+          innerRes.end('Unable to resolve target URL');
+          return;
+        }
+        this.forwardHttpRequest(innerReq, innerRes, upstreamTarget);
+      });
+
+      httpServer.on('clientError', (error, socket) => {
+        socket.end(`HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${error.message}`);
+      });
+
+      httpServer.emit('connection', tlsSocket as net.Socket);
+    };
+
+    tlsSocket.once('secure', onSecure);
+    tlsSocket.once('secureConnect', onSecure as () => void);
+    tlsSocket.on('error', (error) => {
+      this.stats.errors += 1;
+      this.recordEvent('error', targetHost, `MITM TLS error: ${(error as Error).message}`);
+      clientSocket.destroy(error as Error);
+    });
+  }
+
   private handleConnect(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
+    if (this.config.mitmEnabled) {
+      this.handleMitmConnect(req, clientSocket, head);
+      return;
+    }
+
     if (!this.authenticateProxy(req.headers)) {
       clientSocket.write(
         'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="ai-proxy"\r\n\r\n',
@@ -688,6 +894,7 @@ export class ProxyServer {
         protocol: target.protocol,
         hostname: target.hostname,
         port: target.port || undefined,
+        servername: target.hostname,
         method: req.method,
         path: `${target.pathname}${target.search}` || '/',
         headers: {
@@ -697,6 +904,9 @@ export class ProxyServer {
         },
         timeout: this.config.timeoutMs,
         agent,
+        ...(target.protocol === 'https:' && this.config.mitmEnabled && this.config.mitmInsecureUpstream
+          ? { rejectUnauthorized: false }
+          : {}),
       },
       () => {
         // Normal response isn't expected for upgrades, but keep the socket safe.

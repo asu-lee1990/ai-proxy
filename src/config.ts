@@ -11,6 +11,11 @@ export interface ProxyConfig {
   authPass?: string;
   tlsKeyPath?: string;
   tlsCertPath?: string;
+  mitmEnabled?: boolean;
+  mitmInsecureUpstream?: boolean;
+  mitmCaKeyPath?: string;
+  mitmCaCertPath?: string;
+  mitmCacheDir?: string;
   requestHeaders?: string[];
   responseHeaders?: string[];
   timeoutMs?: number;
@@ -28,6 +33,11 @@ export function normalizeConfig(input: Partial<ProxyConfig> = {}): ProxyConfig {
     authPass: input.authPass,
     tlsKeyPath: input.tlsKeyPath,
     tlsCertPath: input.tlsCertPath,
+    mitmEnabled: input.mitmEnabled ?? false,
+    mitmInsecureUpstream: input.mitmInsecureUpstream ?? Boolean(input.mitmEnabled),
+    mitmCaKeyPath: input.mitmCaKeyPath,
+    mitmCaCertPath: input.mitmCaCertPath,
+    mitmCacheDir: input.mitmCacheDir ?? './ssl/mitm-cache',
     requestHeaders: input.requestHeaders ?? [],
     responseHeaders: input.responseHeaders ?? [],
     timeoutMs: input.timeoutMs ?? 30000,

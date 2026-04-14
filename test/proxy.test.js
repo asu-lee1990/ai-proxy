@@ -2,8 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
+const https = require('node:https');
+const tls = require('node:tls');
 const net = require('node:net');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const { once } = require('node:events');
 
 const { ProxyServer } = require('../dist/proxy');
@@ -17,13 +20,72 @@ async function createTargetServer(handler) {
   return server;
 }
 
-async function createProxyServer(protocol, logDir) {
+async function createHttpsTargetServer(root) {
+  const caKey = path.join(root, 'target-ca.key.pem');
+  const caCert = path.join(root, 'target-ca.cert.pem');
+  const serverKey = path.join(root, 'target.key.pem');
+  const serverCert = path.join(root, 'target.cert.pem');
+  const csr = path.join(root, 'target.csr.pem');
+  const ext = path.join(root, 'target.ext.cnf');
+
+  execFileSync(
+    'openssl',
+    ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', caKey, '-out', caCert, '-subj', '/CN=ai-proxy-test-ca', '-days', '2'],
+    { stdio: 'pipe' },
+  );
+
+  fs.writeFileSync(
+    ext,
+    [
+      '[v3_req]',
+      'basicConstraints = CA:FALSE',
+      'keyUsage = digitalSignature, keyEncipherment',
+      'extendedKeyUsage = serverAuth',
+      'subjectAltName = @alt_names',
+      '',
+      '[alt_names]',
+      'DNS.1 = localhost',
+      'IP.1 = 127.0.0.1',
+      '',
+    ].join('\n'),
+  );
+
+  execFileSync(
+    'openssl',
+    ['req', '-new', '-nodes', '-newkey', 'rsa:2048', '-keyout', serverKey, '-out', csr, '-subj', '/CN=localhost'],
+    { stdio: 'pipe' },
+  );
+
+  execFileSync(
+    'openssl',
+    ['x509', '-req', '-in', csr, '-CA', caCert, '-CAkey', caKey, '-CAcreateserial', '-out', serverCert, '-days', '2', '-sha256', '-extfile', ext, '-extensions', 'v3_req'],
+    { stdio: 'pipe', cwd: root },
+  );
+
+  const server = https.createServer(
+    {
+      key: fs.readFileSync(serverKey),
+      cert: fs.readFileSync(serverCert),
+    },
+    (req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(`https-target:${req.url}`);
+    },
+  );
+
+  server.listen(0, '127.0.0.1');
+  await listen(server);
+  return { server, caCert };
+}
+
+async function createProxyServer(protocol, logDir, extra = {}) {
   const proxy = new ProxyServer(
     normalizeConfig({
       host: '127.0.0.1',
       port: 0,
       protocol,
       logDir,
+      ...extra,
     }),
   );
   const server = proxy.start();
@@ -124,6 +186,97 @@ test('HTTP proxy serves a status UI and JSON payload', async () => {
     await closeServer(proxy);
   }
 });
+
+test('MITM HTTPS CONNECT decrypts and forwards requests', async () => {
+  const root = tempDir('ai-proxy-mitm-');
+  const logDir = path.join(root, 'log');
+  const proxyCaKey = path.join(__dirname, '..', 'ssl', 'ca.key.pem');
+  const proxyCaCert = path.join(__dirname, '..', 'ssl', 'ca.cert.pem');
+
+  const target = await createHttpsTargetServer(root);
+  const proxy = await createProxyServer('http', logDir, {
+    mitmEnabled: true,
+    mitmCaKeyPath: proxyCaKey,
+    mitmCaCertPath: proxyCaCert,
+    mitmCacheDir: path.join(root, 'mitm-cache'),
+  });
+
+  try {
+    const targetPort = getPort(target.server);
+    const proxyPort = getPort(proxy);
+    const connectResponse = await new Promise((resolve, reject) => {
+      const socket = net.connect(proxyPort, '127.0.0.1');
+      const connectLine = `CONNECT localhost:${targetPort} HTTP/1.1\r\nHost: localhost:${targetPort}\r\n\r\n`;
+      let buffer = '';
+      let tlsSocket = null;
+      const chunks = [];
+      let done = false;
+      const timeout = setTimeout(() => settle(new Error('MITM client timeout')), 10000);
+
+      function settle(err, value) {
+        if (done) {
+          return;
+        }
+        done = true;
+        clearTimeout(timeout);
+        socket.destroy();
+        if (tlsSocket) {
+          tlsSocket.destroy();
+        }
+        if (err) {
+          reject(err);
+        } else {
+          resolve(value);
+        }
+      }
+
+      socket.on('connect', () => {
+        socket.write(connectLine);
+      });
+
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString('utf8');
+        if (!buffer.includes('\r\n\r\n') || tlsSocket) {
+          return;
+        }
+
+        assert.match(buffer, /200 Connection Established/);
+        tlsSocket = tls.connect({
+          socket,
+          servername: 'localhost',
+          ca: fs.readFileSync(proxyCaCert),
+          rejectUnauthorized: true,
+        });
+
+        tlsSocket.on('secureConnect', () => {
+          tlsSocket.write(`GET /hello?x=1 HTTP/1.1\r\nHost: localhost:${targetPort}\r\nConnection: close\r\n\r\n`);
+        });
+
+        tlsSocket.on('data', (data) => {
+          chunks.push(Buffer.from(data));
+        });
+
+        tlsSocket.on('end', () => {
+          settle(null, Buffer.concat(chunks).toString('utf8'));
+        });
+
+        tlsSocket.on('error', (err) => settle(err));
+      });
+
+      socket.on('error', (err) => settle(err));
+    });
+
+    assert.match(connectResponse, /https-target:\/hello\?x=1/);
+
+    const reqDir = path.join(logDir, 'req', `localhost_${targetPort}`);
+    assert.ok(fs.existsSync(reqDir));
+    assert.ok(fs.readdirSync(reqDir).some((name) => name.endsWith('.req')));
+  } finally {
+    await closeServer(proxy);
+    await closeServer(target.server);
+  }
+});
+
 
 test('SOCKS5 proxy tunnels TCP traffic', async () => {
   const root = tempDir('ai-proxy-socks-');
