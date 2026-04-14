@@ -1,0 +1,9 @@
+{
+  "host": "127.0.0.1",
+  "port": 8080,
+  "protocol": "http",
+  "logDir": "./log",
+  "timeoutMs": 30000,
+  "requestHeaders": ["x-proxy-name=ai-proxy"],
+  "responseHeaders": ["x-proxy-name=ai-proxy"]
+}

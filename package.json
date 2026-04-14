@@ -1,0 +1,24 @@
+{
+  "name": "ai-proxy",
+  "version": "1.0.0",
+  "description": "A TypeScript proxy CLI supporting HTTP, HTTPS, and SOCKS5 proxying with logging.",
+  "main": "dist/index.js",
+  "bin": {
+    "ai-proxy": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^10.0.0",
+    "http-proxy": "^1.18.1"
+  },
+  "devDependencies": {
+    "@types/http-proxy": "^1.17.17",
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.2.0"
+  }
+}
