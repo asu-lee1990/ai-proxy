@@ -1,6 +1,6 @@
 import fs from 'fs';
 
-export type ProxyProtocol = 'http' | 'https' | 'socks5';
+export type ProxyProtocol = 'http' | 'https' | 'socks5' | 'transparent';
 
 export interface ProxyConfig {
   host: string;
@@ -16,6 +16,8 @@ export interface ProxyConfig {
   mitmCaKeyPath?: string;
   mitmCaCertPath?: string;
   mitmCacheDir?: string;
+  transparentHttpPort?: number;
+  transparentTlsPort?: number;
   requestHeaders?: string[];
   responseHeaders?: string[];
   timeoutMs?: number;
@@ -38,6 +40,8 @@ export function normalizeConfig(input: Partial<ProxyConfig> = {}): ProxyConfig {
     mitmCaKeyPath: input.mitmCaKeyPath,
     mitmCaCertPath: input.mitmCaCertPath,
     mitmCacheDir: input.mitmCacheDir ?? './ssl/mitm-cache',
+    transparentHttpPort: input.transparentHttpPort ?? 80,
+    transparentTlsPort: input.transparentTlsPort ?? 443,
     requestHeaders: input.requestHeaders ?? [],
     responseHeaders: input.responseHeaders ?? [],
     timeoutMs: input.timeoutMs ?? 30000,

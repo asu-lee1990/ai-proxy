@@ -4,6 +4,9 @@
   "protocol": "http",
   "logDir": "./log",
   "timeoutMs": 30000,
+  "bodyCaptureLimitBytes": 262144,
+  "transparentHttpPort": 80,
+  "transparentTlsPort": 443,
   "requestHeaders": ["x-proxy-name=ai-proxy"],
   "responseHeaders": ["x-proxy-name=ai-proxy"]
 }

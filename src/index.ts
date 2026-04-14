@@ -33,10 +33,10 @@ function parsePositiveInteger(value: string, label: string): number {
 }
 
 function parseProtocol(value: string): ProxyProtocol {
-  if (value === 'http' || value === 'https' || value === 'socks5') {
+  if (value === 'http' || value === 'https' || value === 'socks5' || value === 'transparent') {
     return value;
   }
-  throw new Error(`Invalid protocol: ${value}. Use http, https, or socks5.`);
+  throw new Error(`Invalid protocol: ${value}. Use http, https, socks5, or transparent.`);
 }
 
 function mergeConfig(base: ProxyConfig, overrides: Partial<ProxyConfig>): ProxyConfig {
@@ -55,7 +55,7 @@ program
   .option('-c, --config <path>', 'Path to a JSON config file')
   .option('--host <host>', 'Listen host')
   .option('--port <port>', 'Listen port', parsePort)
-  .option('--protocol <protocol>', 'http, https, or socks5', parseProtocol)
+  .option('--protocol <protocol>', 'http, https, socks5, or transparent', parseProtocol)
   .option('--log-dir <path>', 'Log directory')
   .option('--auth-user <user>', 'Authentication username')
   .option('--auth-pass <pass>', 'Authentication password')
@@ -66,6 +66,8 @@ program
   .option('--mitm-ca-key <path>', 'CA private key path for MITM leaf signing')
   .option('--mitm-ca-cert <path>', 'CA certificate path for MITM leaf signing')
   .option('--mitm-cache-dir <path>', 'Directory used to cache generated MITM leaf certificates')
+  .option('--transparent-http-port <port>', 'Fallback upstream port for transparent HTTP mode', parsePort)
+  .option('--transparent-tls-port <port>', 'Fallback upstream port for transparent TLS mode', parsePort)
   .option('--request-header <header>', 'Add an upstream request header, key=value', collect, [])
   .option('--response-header <header>', 'Inject a header into proxy responses, key=value', collect, [])
   .option('--timeout-ms <ms>', 'Upstream timeout in milliseconds', parseMilliseconds)
@@ -95,6 +97,8 @@ const mergedConfig = mergeConfig(baseConfig, {
   mitmCaKeyPath: options.mitmCaKey,
   mitmCaCertPath: options.mitmCaCert,
   mitmCacheDir: options.mitmCacheDir,
+  transparentHttpPort: options.transparentHttpPort,
+  transparentTlsPort: options.transparentTlsPort,
   requestHeaders: options.requestHeader,
   responseHeaders: options.responseHeader,
   timeoutMs: options.timeoutMs,

@@ -257,6 +257,101 @@ function addressToSocksReply(address: string, family: string | undefined, port: 
   return reply;
 }
 
+function readUInt24BE(buffer: Buffer, offset: number): number {
+  return (buffer[offset] << 16) | (buffer[offset + 1] << 8) | buffer[offset + 2];
+}
+
+function parseClientHelloSni(buffer: Buffer): string | null {
+  if (buffer.length < 5 || buffer[0] !== 0x16) {
+    return null;
+  }
+
+  const recordLength = buffer.readUInt16BE(3);
+  if (buffer.length < 5 + recordLength) {
+    return null;
+  }
+
+  let offset = 5;
+  if (buffer[offset] !== 0x01) {
+    return null;
+  }
+
+  const handshakeLength = readUInt24BE(buffer, offset + 1);
+  if (buffer.length < 5 + 4 + handshakeLength) {
+    return null;
+  }
+
+  offset += 4; // handshake header
+  offset += 2; // legacy_version
+  offset += 32; // random
+  if (offset + 1 > buffer.length) {
+    return null;
+  }
+
+  const sessionIdLength = buffer[offset];
+  offset += 1 + sessionIdLength;
+  if (offset + 2 > buffer.length) {
+    return null;
+  }
+
+  const cipherSuitesLength = buffer.readUInt16BE(offset);
+  offset += 2 + cipherSuitesLength;
+  if (offset + 1 > buffer.length) {
+    return null;
+  }
+
+  const compressionMethodsLength = buffer[offset];
+  offset += 1 + compressionMethodsLength;
+  if (offset + 2 > buffer.length) {
+    return null;
+  }
+
+  const extensionsLength = buffer.readUInt16BE(offset);
+  offset += 2;
+  const extensionsEnd = offset + extensionsLength;
+  if (extensionsEnd > buffer.length) {
+    return null;
+  }
+
+  while (offset + 4 <= extensionsEnd) {
+    const extensionType = buffer.readUInt16BE(offset);
+    const extensionLength = buffer.readUInt16BE(offset + 2);
+    offset += 4;
+    if (offset + extensionLength > extensionsEnd) {
+      return null;
+    }
+
+    if (extensionType === 0x0000 && extensionLength >= 5) {
+      const serverNameListLength = buffer.readUInt16BE(offset);
+      let listOffset = offset + 2;
+      const listEnd = listOffset + serverNameListLength;
+      if (listEnd > offset + extensionLength) {
+        return null;
+      }
+
+      while (listOffset + 3 <= listEnd) {
+        const nameType = buffer[listOffset];
+        const nameLength = buffer.readUInt16BE(listOffset + 1);
+        listOffset += 3;
+        if (listOffset + nameLength > listEnd) {
+          return null;
+        }
+
+        if (nameType === 0x00) {
+          const hostname = buffer.toString('utf8', listOffset, listOffset + nameLength).trim();
+          return hostname || null;
+        }
+
+        listOffset += nameLength;
+      }
+    }
+
+    offset += extensionLength;
+  }
+
+  return null;
+}
+
 function isIpv4Address(hostname: string): boolean {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname);
 }
@@ -442,6 +537,7 @@ export class ProxyServer {
     connects: 0,
     upgrades: 0,
     socks5: 0,
+    transparent: 0,
     mitm: 0,
   };
 
@@ -491,6 +587,7 @@ export class ProxyServer {
       bodyCaptureLimitBytes: this.config.bodyCaptureLimitBytes,
       authEnabled: Boolean(this.config.authUser || this.config.authPass),
       mitmEnabled: Boolean(this.config.mitmEnabled),
+      transparentEnabled: this.config.protocol === 'transparent',
       stats: this.stats,
       recentEvents: this.recentEvents,
     };
@@ -539,6 +636,7 @@ export class ProxyServer {
         ['Body 上限', String(data.bodyCaptureLimitBytes) + ' bytes'],
         ['认证', data.authEnabled ? 'enabled' : 'disabled'],
         ['MITM', data.mitmEnabled ? 'enabled' : 'disabled'],
+        ['透明代理', data.transparentEnabled ? 'enabled' : 'disabled'],
         ['请求数', data.stats.requests],
         ['响应数', data.stats.responses],
         ['错误数', data.stats.errors],
@@ -546,6 +644,7 @@ export class ProxyServer {
         ['MITM', data.stats.mitm],
         ['UPGRADE', data.stats.upgrades],
         ['SOCKS5', data.stats.socks5],
+        ['透明连接', data.stats.transparent],
       ];
       for (const [label, value] of fields) {
         const item = document.createElement('div');
@@ -753,6 +852,146 @@ export class ProxyServer {
     req.on('aborted', () => {
       upstreamReq.destroy(new Error('Client request aborted'));
     });
+  }
+
+  private async handleTransparentConnection(clientSocket: net.Socket, requestServer: http.Server): Promise<void> {
+    const reader = new SocketReader(clientSocket);
+
+    try {
+      const firstByte = await reader.read(1);
+      if (firstByte[0] === 0x16) {
+        const tlsPort = this.config.transparentTlsPort ?? 443;
+        let tlsBuffer = Buffer.concat([firstByte, reader.detach()]);
+        let hostname = parseClientHelloSni(tlsBuffer);
+        let handled = false;
+
+        const cleanup = () => {
+          clientSocket.off('data', onData);
+          clientSocket.off('error', onError);
+        };
+
+        const startMitm = (serverName: string) => {
+          const targetHost = `${serverName}:${tlsPort}`;
+          this.stats.connects += 1;
+          this.stats.transparent += 1;
+          this.recordEvent('connect', targetHost, `TRANSPARENT TLS ${targetHost}`);
+          this.logger.logRequest(targetHost, `TRANSPARENT TLS ${targetHost}`, {});
+
+          clientSocket.pause();
+          clientSocket.unshift(tlsBuffer);
+          const tlsSocket = new tls.TLSSocket(clientSocket, {
+            isServer: true,
+            secureContext: this.mitmAuthority!.getSecureContext(serverName),
+            ALPNProtocols: ['http/1.1'],
+          });
+          clientSocket.resume();
+
+          let started = false;
+          tlsSocket.once('secure', () => {
+            if (started) {
+              return;
+            }
+            started = true;
+            requestServer.emit('connection', tlsSocket);
+          });
+
+          tlsSocket.on('error', (error) => {
+            this.stats.errors += 1;
+            this.recordEvent('error', 'transparent', `transparent MITM TLS error: ${(error as Error).message}`);
+            this.log(`[TRANSPARENT-MITM] TLS error: ${(error as Error).message}`);
+            clientSocket.destroy(error as Error);
+          });
+        };
+
+        const startTunnel = (serverName: string) => {
+          const targetHost = `${serverName}:${tlsPort}`;
+          this.stats.connects += 1;
+          this.stats.transparent += 1;
+          this.recordEvent('connect', targetHost, `TRANSPARENT TLS ${targetHost}`);
+          this.logger.logRequest(targetHost, `TRANSPARENT TLS ${targetHost}`, {});
+
+          clientSocket.pause();
+          clientSocket.unshift(tlsBuffer);
+          const upstream = net.connect({ host: serverName, port: tlsPort }, () => {
+            clientSocket.pipe(upstream).pipe(clientSocket);
+          });
+          clientSocket.resume();
+
+          upstream.on('error', (error: Error) => {
+            this.stats.errors += 1;
+            this.recordEvent('error', targetHost, `transparent upstream error: ${(error as Error).message}`);
+            clientSocket.destroy(error as Error);
+          });
+
+          clientSocket.on('error', () => {
+            upstream.destroy();
+          });
+        };
+
+        const onError = (error: Error) => {
+          if (handled) {
+            return;
+          }
+          handled = true;
+          cleanup();
+          this.stats.errors += 1;
+          const message = (error as Error).message;
+          this.recordEvent('error', 'transparent', message);
+          this.log(`[TRANSPARENT] ${message}`);
+          clientSocket.destroy(error);
+        };
+
+        const onData = (chunk: Buffer) => {
+          if (handled) {
+            return;
+          }
+          tlsBuffer = Buffer.concat([tlsBuffer, Buffer.from(chunk)]);
+          hostname = parseClientHelloSni(tlsBuffer);
+          if (!hostname) {
+            if (tlsBuffer.length > 8192) {
+              onError(new Error('Unable to parse SNI from TLS ClientHello'));
+            }
+            return;
+          }
+          handled = true;
+          cleanup();
+          if (this.config.mitmEnabled) {
+            startMitm(hostname);
+          } else {
+            startTunnel(hostname);
+          }
+        };
+
+        if (hostname) {
+          handled = true;
+          cleanup();
+          if (this.config.mitmEnabled) {
+            startMitm(hostname);
+          } else {
+            startTunnel(hostname);
+          }
+        } else {
+          clientSocket.on('data', onData);
+          clientSocket.on('error', onError);
+        }
+        return;
+      }
+
+      const remaining = reader.detach();
+      clientSocket.pause();
+      if (remaining.length > 0) {
+        clientSocket.unshift(remaining);
+      }
+      clientSocket.unshift(firstByte);
+      requestServer.emit('connection', clientSocket);
+      clientSocket.resume();
+    } catch (error) {
+      this.stats.errors += 1;
+      const message = (error as Error).message;
+      this.recordEvent('error', 'transparent', message);
+      this.log(`[TRANSPARENT] ${message}`);
+      clientSocket.destroy(error as Error);
+    }
   }
 
   private handleMitmConnect(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
@@ -1107,23 +1346,48 @@ export class ProxyServer {
       this.forwardHttpRequest(req, res, target);
     };
 
-    const server = this.config.protocol === 'https'
-      ? https.createServer(this.getTlsOptions(), handler)
-      : http.createServer(handler);
-
-    server.keepAliveTimeout = 60_000;
-    server.headersTimeout = Math.max((this.config.timeoutMs ?? 30_000) + 5_000, 65_000);
-
-    server.on('connect', (req, clientSocket, head) => this.handleConnect(req, clientSocket, head));
-    server.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
-    server.on('error', (error) => {
+    const requestServer = http.createServer(handler);
+    requestServer.keepAliveTimeout = 60_000;
+    requestServer.headersTimeout = Math.max((this.config.timeoutMs ?? 30_000) + 5_000, 65_000);
+    requestServer.on('connect', (req, clientSocket, head) => this.handleConnect(req, clientSocket, head));
+    requestServer.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
+    requestServer.on('error', (error) => {
       console.error(`[${this.config.protocol.toUpperCase()}] Server error:`, error);
     });
-
-    server.on('close', () => {
+    requestServer.on('close', () => {
       this.httpAgent.destroy();
       this.httpsAgent.destroy();
     });
+
+    let server: http.Server | https.Server | net.Server;
+    if (this.config.protocol === 'https') {
+      const httpsServer = https.createServer(this.getTlsOptions(), handler);
+      httpsServer.keepAliveTimeout = 60_000;
+      httpsServer.headersTimeout = Math.max((this.config.timeoutMs ?? 30_000) + 5_000, 65_000);
+      httpsServer.on('connect', (req, clientSocket, head) => this.handleConnect(req, clientSocket, head));
+      httpsServer.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
+      httpsServer.on('error', (error) => {
+        console.error(`[${this.config.protocol.toUpperCase()}] Server error:`, error);
+      });
+      httpsServer.on('close', () => {
+        this.httpAgent.destroy();
+        this.httpsAgent.destroy();
+      });
+      server = httpsServer;
+    } else if (this.config.protocol === 'transparent') {
+      server = net.createServer((socket) => {
+        void this.handleTransparentConnection(socket, requestServer);
+      });
+      server.on('error', (error) => {
+        console.error('[TRANSPARENT] Server error:', error);
+      });
+      server.on('close', () => {
+        this.httpAgent.destroy();
+        this.httpsAgent.destroy();
+      });
+    } else {
+      server = requestServer;
+    }
 
     server.listen(this.config.port, this.config.host, () => {
       this.log(`${this.config.protocol.toUpperCase()} proxy listening on ${this.config.protocol}://${this.config.host}:${this.config.port}`);

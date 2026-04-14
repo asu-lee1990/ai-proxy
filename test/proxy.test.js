@@ -151,6 +151,40 @@ test('HTTP proxy forwards absolute-form requests', async () => {
 });
 
 
+test('transparent HTTP proxy forwards origin-form requests', async () => {
+  const root = tempDir('ai-proxy-transparent-http-');
+  const logDir = path.join(root, 'log');
+
+  const target = await createTargetServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    res.end(`transparent-http:${req.url}`);
+  });
+
+  const proxy = await createProxyServer('transparent', logDir, {
+    transparentHttpPort: getPort(target),
+  });
+
+  try {
+    const targetPort = getPort(target);
+    const proxyPort = getPort(proxy);
+
+    const result = await httpRequest({
+      host: '127.0.0.1',
+      port: proxyPort,
+      method: 'GET',
+      path: '/hello?x=1',
+      headers: { Host: `127.0.0.1:${targetPort}` },
+    });
+
+    assert.equal(result.statusCode, 200);
+    assert.equal(result.body, 'transparent-http:/hello?x=1');
+  } finally {
+    await closeServer(proxy);
+    await closeServer(target);
+  }
+});
+
+
 test('HTTP proxy serves a status UI and JSON payload', async () => {
   const root = tempDir('ai-proxy-status-');
   const logDir = path.join(root, 'log');
