@@ -41,6 +41,19 @@ export interface TunTcpSession {
   lastFlags: string[];
 }
 
+export interface TunTcpSessionSummary {
+  id: string;
+  client: string;
+  server: string;
+  state: TcpSessionState;
+  packets: number;
+  bytesFromClient: number;
+  bytesFromServer: number;
+  lastSeenAt: number;
+  ageMs: number;
+  lastFlags: string[];
+}
+
 export interface TunSessionEvent {
   type: 'session-start' | 'session-update' | 'session-close' | 'packet';
   direction: TcpDirection;
@@ -301,6 +314,24 @@ export class TunSessionManager extends EventEmitter {
     return Array.from(this.sessions.values()).map(cloneSession);
   }
 
+  summarize(limit = 8, now = Date.now()): TunTcpSessionSummary[] {
+    return Array.from(this.sessions.values())
+      .sort((a, b) => b.lastSeenAt - a.lastSeenAt)
+      .slice(0, limit)
+      .map((session) => ({
+        id: session.id,
+        client: `${session.client.ip}:${session.client.port}`,
+        server: `${session.server.ip}:${session.server.port}`,
+        state: session.state,
+        packets: session.packets,
+        bytesFromClient: session.bytesFromClient,
+        bytesFromServer: session.bytesFromServer,
+        lastSeenAt: session.lastSeenAt,
+        ageMs: Math.max(0, now - session.lastSeenAt),
+        lastFlags: [...session.lastFlags],
+      }));
+  }
+
   deleteSession(id: string): boolean {
     return this.sessions.delete(id);
   }
@@ -461,6 +492,10 @@ export class TunTcpBridge extends EventEmitter {
 
   snapshot(): TunTcpSession[] {
     return this.sessionManager.snapshot();
+  }
+
+  summarizeSessions(limit = 8): TunTcpSessionSummary[] {
+    return this.sessionManager.summarize(limit);
   }
 
   handlePacket(summary: TunPacketSummary, packet: Buffer): void {

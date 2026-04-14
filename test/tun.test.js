@@ -178,6 +178,12 @@ test('TunTcpBridge evicts idle flows', () => {
     bridge.handlePacket(synSummary, synPacket);
     assert.equal(bridge.snapshot().length, 1);
 
+    const summaries = bridge.summarizeSessions(1);
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0].client, '10.0.0.1:54321');
+    assert.equal(summaries[0].server, '1.1.1.1:443');
+    assert.ok(typeof summaries[0].ageMs === 'number');
+
     const evicted = bridge.evictIdleFlows(Date.now() + 10_000);
     assert.equal(evicted, 1);
     assert.equal(bridge.snapshot().length, 0);

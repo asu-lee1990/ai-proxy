@@ -580,7 +580,7 @@ export class ProxyServer {
   }
 
   private buildStatusData(): Record<string, unknown> {
-    const tunSessions = this.tunBridge?.snapshot() ?? [];
+    const tunSessions = this.tunBridge?.summarizeSessions(8) ?? [];
     return {
       service: 'ai-proxy',
       protocol: this.config.protocol,

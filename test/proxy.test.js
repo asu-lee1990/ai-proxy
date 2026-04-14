@@ -218,6 +218,11 @@ test('HTTP proxy serves a status UI and JSON payload', async () => {
     assert.equal(payload.protocol, 'http');
     assert.ok(Array.isArray(payload.recentEvents));
     assert.ok(Array.isArray(payload.tunSessions));
+    if (payload.tunSessions.length > 0) {
+      assert.equal(typeof payload.tunSessions[0].client, 'string');
+      assert.equal(typeof payload.tunSessions[0].server, 'string');
+      assert.equal(typeof payload.tunSessions[0].ageMs, 'number');
+    }
   } finally {
     await closeServer(proxy);
   }
