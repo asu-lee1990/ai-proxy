@@ -10,7 +10,7 @@ import tls from 'tls';
 import { Duplex } from 'stream';
 import { normalizeConfig, ProxyConfig } from './config';
 import { HeaderMap, Logger } from './logger';
-import { formatTunSummary, TunMonitor } from './tun';
+import { formatTunSummary, TunMonitor, TunTcpBridge } from './tun';
 
 interface HeaderOverrides {
   [key: string]: string;
@@ -540,6 +540,7 @@ export class ProxyServer {
     socks5: 0,
     transparent: 0,
     tunPackets: 0,
+    tunSessions: 0,
     mitm: 0,
   };
 
@@ -650,6 +651,7 @@ export class ProxyServer {
         ['SOCKS5', data.stats.socks5],
         ['透明连接', data.stats.transparent],
         ['TUN 包', data.stats.tunPackets],
+        ['TUN 会话', data.stats.tunSessions],
       ];
       for (const [label, value] of fields) {
         const item = document.createElement('div');
@@ -1007,9 +1009,18 @@ export class ProxyServer {
 
     const tunIface = process.env.TUN_IFACE || 'tun0';
     const tunMonitor = new TunMonitor(tunFdValue, this.config.tunBufferSize ?? 65535);
+    const tunBridge = new TunTcpBridge(tunFdValue);
 
-    tunMonitor.on('packet', (summary) => {
+    tunBridge.on('error', (error: Error) => {
+      this.stats.errors += 1;
+      this.recordEvent('error', tunIface, error.message);
+      this.log(`[TUN] ${error.message}`);
+    });
+
+    tunMonitor.on('packet', (summary, packet) => {
       this.stats.tunPackets += 1;
+      tunBridge.handlePacket(summary, packet);
+      this.stats.tunSessions = tunBridge.activeSessions;
       this.recordEvent('tun', `${summary.src} -> ${summary.dst}`, formatTunSummary(summary));
       this.log(`[TUN] ${formatTunSummary(summary)}`);
     });

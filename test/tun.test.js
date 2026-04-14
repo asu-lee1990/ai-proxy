@@ -1,10 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { parseIpv4Packet, formatTunSummary } = require('../dist/tun');
+const { parseIpv4Packet, formatTunSummary, TunSessionManager } = require('../dist/tun');
 
-function buildIpv4TcpPacket() {
-  const packet = Buffer.alloc(20 + 20 + 5);
+function buildIpv4TcpPacket(flags = 0x18, payload = 'hello') {
+  const packet = Buffer.alloc(20 + 20 + Buffer.byteLength(payload));
   packet[0] = 0x45; // v4, IHL=5
   packet[1] = 0x00;
   packet.writeUInt16BE(packet.length, 2);
@@ -27,12 +27,12 @@ function buildIpv4TcpPacket() {
   packet.writeUInt32BE(100, tcp + 4);
   packet.writeUInt32BE(200, tcp + 8);
   packet[tcp + 12] = 0x50; // data offset 5
-  packet[tcp + 13] = 0x18; // PSH + ACK
+  packet[tcp + 13] = flags;
   packet.writeUInt16BE(65535, tcp + 14);
   packet.writeUInt16BE(0, tcp + 16);
   packet.writeUInt16BE(0, tcp + 18);
 
-  packet.write('hello', tcp + 20, 'utf8');
+  packet.write(payload, tcp + 20, 'utf8');
   return packet;
 }
 
@@ -53,4 +53,24 @@ test('parseIpv4Packet parses a TCP packet summary', () => {
 
 test('parseIpv4Packet returns null for non-IPv4 input', () => {
   assert.equal(parseIpv4Packet(Buffer.from([0x60, 0, 0, 0])), null);
+});
+
+test('TunSessionManager tracks TCP sessions', () => {
+  const manager = new TunSessionManager();
+  const synSummary = parseIpv4Packet(buildIpv4TcpPacket(0x02, ''));
+  assert.ok(synSummary);
+
+  const start = manager.processPacket(synSummary, Buffer.alloc(0));
+  assert.ok(start);
+  assert.equal(manager.activeCount, 1);
+  assert.equal(start.session.state, 'syn-sent');
+
+  const ackSummary = parseIpv4Packet(buildIpv4TcpPacket(0x18, 'ping'));
+  assert.ok(ackSummary);
+
+  const update = manager.processPacket(ackSummary, Buffer.from('ping'));
+  assert.ok(update);
+  assert.equal(manager.activeCount, 1);
+  assert.equal(update.session.state, 'established');
+  assert.equal(update.session.bytesFromClient, 4);
 });
