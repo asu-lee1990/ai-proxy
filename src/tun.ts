@@ -462,8 +462,14 @@ export class TunTcpBridge extends EventEmitter {
     const flow = this.ensureFlow(summary);
     flow.lastSeenAt = Date.now();
 
+    if (flow.closed) {
+      return;
+    }
+
     const flags = summary.flags ?? [];
     if (hasFlag(flags, 'RST')) {
+      this.sendTcpPacket(flow, ['RST'], Buffer.alloc(0), flow.clientAck);
+      flow.closed = true;
       this.closeFlow(flow.id);
       return;
     }
@@ -485,7 +491,12 @@ export class TunTcpBridge extends EventEmitter {
     if (hasFlag(flags, 'FIN')) {
       flow.clientAck = u32((summary.sequence ?? 0) + payload.length + 1);
       this.sendTcpPacket(flow, ['FIN', 'ACK'], Buffer.alloc(0), flow.clientAck);
-      this.closeFlow(flow.id);
+      flow.closed = true;
+      if (flow.socket) {
+        flow.socket.end();
+      } else {
+        this.closeFlow(flow.id);
+      }
     }
   }
 

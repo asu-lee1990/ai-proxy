@@ -82,6 +82,7 @@ test('TunTcpBridge advances sequence numbers once per segment', async () => {
   const originalWrite = fs.write;
   const originalConnect = net.connect;
   const writes = [];
+  let endCalls = 0;
 
   fs.write = (fd, buffer, offset, length, position, callback) => {
     const slice = Buffer.from(buffer.subarray(offset, offset + length));
@@ -95,6 +96,7 @@ test('TunTcpBridge advances sequence numbers once per segment', async () => {
     const socket = new events.EventEmitter();
     socket.write = () => true;
     socket.destroy = () => {};
+    socket.end = () => { endCalls += 1; queueMicrotask(() => socket.emit('close')); };
     socket.setNoDelay = () => {};
     socket.setKeepAlive = () => {};
     socket.pause = () => {};
@@ -117,14 +119,25 @@ test('TunTcpBridge advances sequence numbers once per segment', async () => {
     bridge.handlePacket(synSummary, synPacket);
     bridge.handlePacket(dataSummary, dataPacket);
 
-    assert.equal(writes.length >= 2, true);
+    const finPacket = buildIpv4TcpPacket(0x11, '');
+    const finSummary = parseIpv4Packet(finPacket);
+    assert.ok(finSummary);
+    bridge.handlePacket(finSummary, finPacket);
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(writes.length >= 3, true);
     const synAck = parseIpv4Packet(writes[0]);
     const ackOnly = parseIpv4Packet(writes[1]);
+    const finAck = parseIpv4Packet(writes[2]);
     assert.ok(synAck);
     assert.ok(ackOnly);
+    assert.ok(finAck);
     assert.deepEqual(synAck.flags, ['SYN', 'ACK']);
     assert.deepEqual(ackOnly.flags, ['ACK']);
+    assert.deepEqual(finAck.flags, ['FIN', 'ACK']);
     assert.equal(ackOnly.sequence, synAck.sequence + 1);
+    assert.equal(endCalls, 1);
   } finally {
     fs.write = originalWrite;
     net.connect = originalConnect;
