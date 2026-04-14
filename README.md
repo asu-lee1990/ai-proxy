@@ -92,25 +92,90 @@ npm start -- \
 - `scripts/tun-deploy.sh`：创建/刷新 iptables 透明重定向规则
 - `scripts/tun-cleanup.sh`：清理这套规则
 
-默认按 `OUTPUT` 链做本机透明代理，把 80/443 的流量重定向到本地 `ai-proxy`。
+这套脚本的定位是 **透明重定向接入**，不是完整 kernel TUN。它适合把系统的 HTTP / HTTPS 流量导到本地 `ai-proxy`，再由代理负责日志、MITM、转发。
 
-示例：
+#### 前置条件
+
+- Linux
+- root 权限（或能执行 `iptables`）
+- 已安装 `iptables`
+- `ai-proxy` 已在本机启动透明模式，例如：
 
 ```bash
-sudo PROXY_UID=$(id -u ai-proxy) PROXY_PORT=8080 ./scripts/tun-deploy.sh
+npm start -- --protocol transparent --host 127.0.0.1 --port 8080
 ```
 
-如果只想临时跑本机调试，也可以让规则排除当前用户的流量：
+如果要解密 HTTPS CONNECT 或透明 TLS，可以再加：
+
+```bash
+npm start -- \
+  --protocol transparent \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --mitm \
+  --mitm-ca-key ./ssl/ca.key.pem \
+  --mitm-ca-cert ./ssl/ca.cert.pem \
+  --mitm-cache-dir ./ssl/mitm-cache
+```
+
+#### 本机透明代理（推荐先跑这个）
+
+默认按 `OUTPUT` 链做本机透明代理，把 80/443 的流量重定向到本地 `ai-proxy`。
 
 ```bash
 sudo PROXY_PORT=8080 PROXY_USER=$USER ./scripts/tun-deploy.sh
 ```
 
-清理规则：
+或者，如果代理是单独的系统用户运行，可以排除它自己的出站流量：
+
+```bash
+sudo PROXY_PORT=8080 PROXY_UID=$(id -u ai-proxy) ./scripts/tun-deploy.sh
+```
+
+#### 网关 / 转发场景
+
+如果你在 Linux 网关、虚拟机或转发主机上部署，可切换到 `PREROUTING`：
+
+```bash
+sudo MODE=prerouting PROXY_PORT=8080 ./scripts/tun-deploy.sh
+```
+
+注意：这类场景通常还需要你自己额外处理路由、返回路径和 `net.ipv4.ip_forward=1`。
+
+#### 调整重定向端口
+
+脚本默认只重定向：
+
+- `HTTP_PORTS=80`
+- `HTTPS_PORTS=443`
+
+如果你想改成别的端口范围，可以直接传环境变量：
+
+```bash
+sudo HTTP_PORTS=80,8080 HTTPS_PORTS=443,8443 PROXY_PORT=8080 ./scripts/tun-deploy.sh
+```
+
+#### 验证
+
+启用规则后，可以先看状态页确认代理在工作：
+
+- `http://127.0.0.1:8080/status`
+- `http://127.0.0.1:8080/status.json`
+
+如果前面还有 Nginx，也可以把这两个路径转发过去。
+
+#### 清理规则
 
 ```bash
 sudo ./scripts/tun-cleanup.sh
 ```
+
+#### 常见注意点
+
+- 这不是完整的 kernel TUN；它是 iptables 透明重定向。
+- 透明 HTTPS 解密依赖 `--mitm` 和你的 CA 证书。
+- 如果代理自己的流量被重定向回自己，优先检查 `PROXY_UID` / `PROXY_USER`。
+- 如果网络环境复杂，先用 `MODE=output` 在单机上验证，再上 `prerouting`。
 
 ### 开启 MITM 解密（CONNECT）
 
