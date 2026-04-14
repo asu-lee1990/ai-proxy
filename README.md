@@ -87,18 +87,21 @@ npm start -- \
 
 ### Linux 透明代理部署脚本
 
-仓库里提供了两个脚本：
+仓库里提供了几份脚本：
 
+- `scripts/tun-helper.c`：真正创建 `/dev/net/tun` 的最小 privileged helper
+- `scripts/tun-run.sh`：编译并运行 helper 的包装脚本
 - `scripts/tun-deploy.sh`：创建/刷新 iptables 透明重定向规则
 - `scripts/tun-cleanup.sh`：清理这套规则
 
-这套脚本的定位是 **透明重定向接入**，不是完整 kernel TUN。它适合把系统的 HTTP / HTTPS 流量导到本地 `ai-proxy`，再由代理负责日志、MITM、转发。
+这套脚本的定位是 **透明重定向接入**，而 `scripts/tun-helper.c` 则是创建真实 kernel TUN 的最小 helper。它们适合把系统的 HTTP / HTTPS 流量导到本地 `ai-proxy`，再由代理负责日志、MITM、转发。
 
 #### 前置条件
 
 - Linux
 - root 权限（或能执行 `iptables`）
 - 已安装 `iptables`
+- 已安装 `gcc`（如果要编译 `tun-helper.c`）
 - `ai-proxy` 已在本机启动透明模式，例如：
 
 ```bash
