@@ -202,6 +202,7 @@ test('HTTP proxy serves a status UI and JSON payload', async () => {
 
     assert.equal(html.statusCode, 200);
     assert.match(html.body, /ai-proxy 状态页/);
+    assert.match(html.body, /TUN 活跃会话/);
 
     const json = await httpRequest({
       host: '127.0.0.1',
@@ -216,6 +217,7 @@ test('HTTP proxy serves a status UI and JSON payload', async () => {
     assert.equal(payload.service, 'ai-proxy');
     assert.equal(payload.protocol, 'http');
     assert.ok(Array.isArray(payload.recentEvents));
+    assert.ok(Array.isArray(payload.tunSessions));
   } finally {
     await closeServer(proxy);
   }

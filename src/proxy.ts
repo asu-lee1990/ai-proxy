@@ -529,6 +529,7 @@ export class ProxyServer {
   private readonly httpAgent: http.Agent;
   private readonly httpsAgent: https.Agent;
   private readonly mitmAuthority?: MitmCertificateAuthority;
+  private tunBridge?: TunTcpBridge;
   private readonly startedAt = Date.now();
   private readonly recentEvents: ProxyEvent[] = [];
   private readonly stats = {
@@ -579,6 +580,7 @@ export class ProxyServer {
   }
 
   private buildStatusData(): Record<string, unknown> {
+    const tunSessions = this.tunBridge?.snapshot() ?? [];
     return {
       service: 'ai-proxy',
       protocol: this.config.protocol,
@@ -593,6 +595,7 @@ export class ProxyServer {
       transparentEnabled: this.config.protocol === 'transparent',
       tunEnabled: this.config.protocol === 'tun',
       stats: this.stats,
+      tunSessions,
       recentEvents: this.recentEvents,
     };
   }
@@ -623,6 +626,8 @@ export class ProxyServer {
     <h1>ai-proxy 状态页</h1>
     <div class="muted">自动刷新：每 3 秒</div>
     <div class="grid" id="stats"></div>
+    <h2>TUN 活跃会话</h2>
+    <pre id="sessions">${escapeHtml(JSON.stringify(status.tunSessions, null, 2))}</pre>
     <h2>最近事件</h2>
     <pre id="events">${escapeHtml(JSON.stringify(status.recentEvents, null, 2))}</pre>
     <p><a href="/status.json">查看 JSON</a></p>
@@ -659,6 +664,7 @@ export class ProxyServer {
         item.innerHTML = '<div class="label">' + label + '</div><div class="value">' + String(value) + '</div>';
         stats.appendChild(item);
       }
+      document.getElementById('sessions').textContent = JSON.stringify(data.tunSessions, null, 2);
       document.getElementById('events').textContent = JSON.stringify(data.recentEvents, null, 2);
     };
 
@@ -1010,6 +1016,7 @@ export class ProxyServer {
     const tunIface = process.env.TUN_IFACE || 'tun0';
     const tunMonitor = new TunMonitor(tunFdValue, this.config.tunBufferSize ?? 65535);
     const tunBridge = new TunTcpBridge(tunFdValue);
+    this.tunBridge = tunBridge;
 
     tunBridge.on('error', (error: Error) => {
       this.stats.errors += 1;
