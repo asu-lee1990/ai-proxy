@@ -8,7 +8,7 @@ const { once } = require('node:events');
 
 const { ProxyServer } = require('../dist/proxy');
 const { normalizeConfig } = require('../dist/config');
-const { closeServer, getPort, listen, tempDir } = require('./helpers');
+const { closeServer, createBufferedReader, getPort, listen, tempDir } = require('./helpers');
 
 async function createTargetServer(handler) {
   const server = http.createServer(handler);
@@ -52,18 +52,6 @@ function httpRequest(options, body) {
       req.end();
     }
   });
-}
-
-async function readOnce(socket) {
-  const [chunk] = await once(socket, 'data');
-  return Buffer.from(chunk);
-}
-
-async function readSocketToEnd(socket) {
-  const chunks = [];
-  socket.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
-  await once(socket, 'end');
-  return Buffer.concat(chunks).toString('utf8');
 }
 
 test('HTTP proxy forwards absolute-form requests', async () => {
@@ -117,9 +105,10 @@ test('SOCKS5 proxy tunnels TCP traffic', async () => {
 
     const socket = net.connect(proxyPort, '127.0.0.1');
     await once(socket, 'connect');
+    const reader = createBufferedReader(socket);
 
     socket.write(Buffer.from([0x05, 0x01, 0x00]));
-    const greeting = await readOnce(socket);
+    const greeting = await reader.readExact(2);
     assert.deepEqual([...greeting], [0x05, 0x00]);
 
     socket.write(Buffer.from([
@@ -135,7 +124,7 @@ test('SOCKS5 proxy tunnels TCP traffic', async () => {
       targetPort & 0xff,
     ]));
 
-    const connectReply = await readOnce(socket);
+    const connectReply = await reader.readExact(10);
     assert.equal(connectReply[0], 0x05);
     assert.equal(connectReply[1], 0x00);
 
@@ -143,8 +132,8 @@ test('SOCKS5 proxy tunnels TCP traffic', async () => {
       `GET /through-socks HTTP/1.1\r\nHost: 127.0.0.1:${targetPort}\r\nConnection: close\r\n\r\n`,
     );
 
-    const response = await readSocketToEnd(socket);
-    assert.match(response, /socks-ok:\/through-socks/);
+    const response = await reader.readAll();
+    assert.match(response.toString('utf8'), /socks-ok:\/through-socks/);
 
     socket.destroy();
 
