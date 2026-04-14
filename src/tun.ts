@@ -442,13 +442,15 @@ export class TunTcpBridge extends EventEmitter {
   private readonly idleTimeoutMs: number;
   private readonly sweepIntervalMs: number;
   private readonly sweepTimer: NodeJS.Timeout;
+  private lastSweepAt: number;
 
   constructor(private readonly fd: number, options: { idleTimeoutMs?: number; sweepIntervalMs?: number } = {}) {
     super();
     this.idleTimeoutMs = options.idleTimeoutMs ?? 60_000;
     this.sweepIntervalMs = options.sweepIntervalMs ?? Math.min(30_000, this.idleTimeoutMs);
+    this.lastSweepAt = Date.now();
     this.sweepTimer = setInterval(() => {
-      this.evictIdleFlows();
+      this.maybeSweepIdleFlows();
     }, this.sweepIntervalMs);
     this.sweepTimer.unref();
   }
@@ -462,7 +464,7 @@ export class TunTcpBridge extends EventEmitter {
   }
 
   handlePacket(summary: TunPacketSummary, packet: Buffer): void {
-    this.evictIdleFlows();
+    this.maybeSweepIdleFlows();
     if (summary.family !== 'ipv4' || summary.protocol !== 6 || summary.srcPort === undefined || summary.dstPort === undefined) {
       return;
     }
@@ -522,6 +524,7 @@ export class TunTcpBridge extends EventEmitter {
   }
 
   evictIdleFlows(now = Date.now()): number {
+    this.lastSweepAt = now;
     let evicted = 0;
     for (const [id, flow] of this.flows.entries()) {
       if (now - flow.lastSeenAt <= this.idleTimeoutMs) {
@@ -531,6 +534,13 @@ export class TunTcpBridge extends EventEmitter {
       evicted += 1;
     }
     return evicted;
+  }
+
+  private maybeSweepIdleFlows(now = Date.now()): number {
+    if (now - this.lastSweepAt < this.sweepIntervalMs) {
+      return 0;
+    }
+    return this.evictIdleFlows(now);
   }
 
   private ensureFlow(summary: TunPacketSummary): TunTcpBridgeFlow {
