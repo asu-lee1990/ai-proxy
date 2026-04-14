@@ -85,6 +85,33 @@ npm start -- \
 
 来调试特殊环境下的回退端口。
 
+### Linux 透明代理部署脚本
+
+仓库里提供了两个脚本：
+
+- `scripts/tun-deploy.sh`：创建/刷新 iptables 透明重定向规则
+- `scripts/tun-cleanup.sh`：清理这套规则
+
+默认按 `OUTPUT` 链做本机透明代理，把 80/443 的流量重定向到本地 `ai-proxy`。
+
+示例：
+
+```bash
+sudo PROXY_UID=$(id -u ai-proxy) PROXY_PORT=8080 ./scripts/tun-deploy.sh
+```
+
+如果只想临时跑本机调试，也可以让规则排除当前用户的流量：
+
+```bash
+sudo PROXY_PORT=8080 PROXY_USER=$USER ./scripts/tun-deploy.sh
+```
+
+清理规则：
+
+```bash
+sudo ./scripts/tun-cleanup.sh
+```
+
 ### 开启 MITM 解密（CONNECT）
 
 MITM 模式用于解密 HTTPS CONNECT 流量，并把请求 / 响应记录下来。
