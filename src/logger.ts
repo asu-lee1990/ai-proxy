@@ -10,6 +10,7 @@ export interface LogEntry {
   line: string;
   headers: HeaderMap;
   body?: Buffer;
+  bodyTruncated?: boolean;
 }
 
 const TEXT_CONTENT_RE = /^(text\/|application\/(json|xml|javascript|x-www-form-urlencoded)|image\/svg\+xml)/i;
@@ -63,11 +64,11 @@ function inferExtension(contentType: string, disposition: string): string {
   return '.bin';
 }
 
-function shouldPersistBody(headers: HeaderMap, body: Buffer): boolean {
+function shouldPersistBody(headers: HeaderMap, body: Buffer, bodyTruncated = false): boolean {
   const contentType = getHeaderValue(headers, 'content-type');
   const disposition = getHeaderValue(headers, 'content-disposition');
 
-  if (disposition) {
+  if (bodyTruncated || disposition) {
     return true;
   }
 
@@ -82,12 +83,13 @@ function shouldPersistBody(headers: HeaderMap, body: Buffer): boolean {
   return BINARY_CONTENT_RE.test(contentType) || !TEXT_CONTENT_RE.test(contentType);
 }
 
-function bodyToText(headers: HeaderMap, body: Buffer, bodyDir: string): string {
+function bodyToText(headers: HeaderMap, body: Buffer, bodyDir: string, bodyTruncated = false): string {
   const contentType = getHeaderValue(headers, 'content-type');
   const disposition = getHeaderValue(headers, 'content-disposition');
 
-  if (!shouldPersistBody(headers, body)) {
-    return body.toString('utf8');
+  if (!shouldPersistBody(headers, body, bodyTruncated)) {
+    const text = body.toString('utf8');
+    return bodyTruncated ? `${text}\n[truncated after ${body.length} bytes]` : text;
   }
 
   const safeDir = path.join(bodyDir, sanitizeSegment(getHeaderValue(headers, 'x-target-host') || 'unknown'));
@@ -100,7 +102,7 @@ function bodyToText(headers: HeaderMap, body: Buffer, bodyDir: string): string {
   const fileName = `${Date.now()}-${crypto.randomUUID()}-${baseName}${ext}`;
   const filePath = path.join(safeDir, fileName);
   fs.writeFileSync(filePath, body);
-  return `file://${filePath}`;
+  return bodyTruncated ? `file://${filePath} (truncated after ${body.length} bytes)` : `file://${filePath}`;
 }
 
 export class Logger {
@@ -125,7 +127,7 @@ export class Logger {
       ...entry.headers,
       'x-target-host': entry.targetHost,
     };
-    const bodyText = entry.body ? bodyToText(headerMapForBody, entry.body, bodyDir) : '';
+    const bodyText = entry.body ? bodyToText(headerMapForBody, entry.body, bodyDir, entry.bodyTruncated) : '';
 
     const content = [entry.line, ...headerLines, '', bodyText].join('\n');
     const suffix = entry.kind === 'req' ? '.req' : '.rsp';
@@ -133,11 +135,11 @@ export class Logger {
     fs.writeFileSync(filePath, content);
   }
 
-  logRequest(targetHost: string, line: string, headers: HeaderMap, body?: Buffer): void {
-    this.log({ kind: 'req', targetHost, line, headers, body });
+  logRequest(targetHost: string, line: string, headers: HeaderMap, body?: Buffer, bodyTruncated = false): void {
+    this.log({ kind: 'req', targetHost, line, headers, body, bodyTruncated });
   }
 
-  logResponse(targetHost: string, line: string, headers: HeaderMap, body?: Buffer): void {
-    this.log({ kind: 'rsp', targetHost, line, headers, body });
+  logResponse(targetHost: string, line: string, headers: HeaderMap, body?: Buffer, bodyTruncated = false): void {
+    this.log({ kind: 'rsp', targetHost, line, headers, body, bodyTruncated });
   }
 }

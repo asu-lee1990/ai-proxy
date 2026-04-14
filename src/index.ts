@@ -24,6 +24,14 @@ function parseMilliseconds(value: string): number {
   return ms;
 }
 
+function parsePositiveInteger(value: string, label: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed < 0) {
+    throw new Error(`Invalid ${label}: ${value}`);
+  }
+  return parsed;
+}
+
 function parseProtocol(value: string): ProxyProtocol {
   if (value === 'http' || value === 'https' || value === 'socks5') {
     return value;
@@ -56,6 +64,7 @@ program
   .option('--request-header <header>', 'Add an upstream request header, key=value', collect, [])
   .option('--response-header <header>', 'Inject a header into proxy responses, key=value', collect, [])
   .option('--timeout-ms <ms>', 'Upstream timeout in milliseconds', parseMilliseconds)
+  .option('--log-body-max-bytes <bytes>', 'Maximum bytes to keep in memory for request/response body logging', (value) => parsePositiveInteger(value, 'body capture limit'))
   .option('--quiet', 'Disable console logging', false)
   .parse(process.argv);
 
@@ -79,6 +88,7 @@ const mergedConfig = mergeConfig(baseConfig, {
   requestHeaders: options.requestHeader,
   responseHeaders: options.responseHeader,
   timeoutMs: options.timeoutMs,
+  bodyCaptureLimitBytes: options.logBodyMaxBytes,
   quiet: options.quiet,
 });
 

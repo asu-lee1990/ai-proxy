@@ -14,6 +14,7 @@ export interface ProxyConfig {
   requestHeaders?: string[];
   responseHeaders?: string[];
   timeoutMs?: number;
+  bodyCaptureLimitBytes?: number;
   quiet?: boolean;
 }
 
@@ -30,6 +31,7 @@ export function normalizeConfig(input: Partial<ProxyConfig> = {}): ProxyConfig {
     requestHeaders: input.requestHeaders ?? [],
     responseHeaders: input.responseHeaders ?? [],
     timeoutMs: input.timeoutMs ?? 30000,
+    bodyCaptureLimitBytes: input.bodyCaptureLimitBytes ?? 256 * 1024,
     quiet: input.quiet ?? false,
   };
 }

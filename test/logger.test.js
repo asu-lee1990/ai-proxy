@@ -52,3 +52,29 @@ test('Logger persists binary bodies and content-disposition payloads to files', 
   const bodyFiles = fs.readdirSync(bodyDir);
   assert.ok(bodyFiles.some((name) => name.endsWith('.bin') && name.includes('report.bin')));
 });
+
+test('Logger annotates truncated inline bodies', () => {
+  const root = tempDir('ai-proxy-logs-');
+  const logDir = path.join(root, 'log');
+  const logger = new Logger(logDir);
+
+  logger.logRequest(
+    'example.com:8080',
+    'POST /upload HTTP/1.1',
+    { 'content-type': 'text/plain; charset=utf-8' },
+    Buffer.from('abcdef', 'utf8'),
+  );
+
+  logger.logResponse(
+    'example.com:8080',
+    'HTTP/1.1 200 OK',
+    { 'content-type': 'text/plain; charset=utf-8' },
+    Buffer.from('abcdef', 'utf8'),
+    true,
+  );
+
+  const rspDir = path.join(logDir, 'rsp', 'example.com_8080');
+  const rspFile = firstFilePath(rspDir);
+  const rspContent = fs.readFileSync(rspFile, 'utf8');
+  assert.match(rspContent, /truncated after 6 bytes/);
+});

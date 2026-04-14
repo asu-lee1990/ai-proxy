@@ -21,6 +21,7 @@ test('normalizeConfig applies safe defaults', () => {
     requestHeaders: [],
     responseHeaders: [],
     timeoutMs: 30000,
+    bodyCaptureLimitBytes: 256 * 1024,
     quiet: false,
   });
 });

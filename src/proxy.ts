@@ -246,17 +246,59 @@ function addressToSocksReply(address: string, family: string | undefined, port: 
   return reply;
 }
 
+interface BodyCaptureState {
+  chunks: Buffer[];
+  bytes: number;
+  truncated: boolean;
+}
+
+function createBodyCaptureState(): BodyCaptureState {
+  return {
+    chunks: [],
+    bytes: 0,
+    truncated: false,
+  };
+}
+
+function captureBodyChunk(state: BodyCaptureState, chunk: Buffer, limit: number): void {
+  if (limit <= 0) {
+    state.truncated = state.truncated || chunk.length > 0;
+    return;
+  }
+
+  if (state.bytes >= limit) {
+    state.truncated = true;
+    return;
+  }
+
+  const remaining = limit - state.bytes;
+  const slice = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
+  state.chunks.push(Buffer.from(slice));
+  state.bytes += slice.length;
+  if (slice.length < chunk.length) {
+    state.truncated = true;
+  }
+}
+
+function captureBodyBuffer(state: BodyCaptureState): Buffer {
+  return state.bytes > 0 ? Buffer.concat(state.chunks, state.bytes) : Buffer.alloc(0);
+}
+
 export class ProxyServer {
   private readonly config: ProxyConfig;
   private readonly logger: Logger;
   private readonly requestOverrides: HeaderOverrides;
   private readonly responseOverrides: HeaderOverrides;
+  private readonly httpAgent: http.Agent;
+  private readonly httpsAgent: https.Agent;
 
   constructor(config: ProxyConfig) {
     this.config = normalizeConfig(config);
     this.logger = new Logger(this.config.logDir);
     this.requestOverrides = parseHeaderOverrides(this.config.requestHeaders);
     this.responseOverrides = parseHeaderOverrides(this.config.responseHeaders);
+    this.httpAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
+    this.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
   }
 
   private log(message: string): void {
@@ -331,9 +373,10 @@ export class ProxyServer {
   private forwardHttpRequest(req: IncomingMessage, res: ServerResponse, target: URL): void {
     const targetHost = target.port ? `${target.hostname}:${target.port}` : target.hostname;
     const requestHeaders = this.buildUpstreamHeaders(req, target);
-    const requestBody: Buffer[] = [];
-    const isHttpsTarget = target.protocol === 'https:';
-    const client = isHttpsTarget ? https : http;
+    const requestBody = createBodyCaptureState();
+    const responseBody = createBodyCaptureState();
+    const client = target.protocol === 'https:' ? https : http;
+    const agent = target.protocol === 'https:' ? this.httpsAgent : this.httpAgent;
 
     const upstreamReq = client.request(
       {
@@ -344,22 +387,28 @@ export class ProxyServer {
         path: `${target.pathname}${target.search}` || '/',
         headers: requestHeaders,
         timeout: this.config.timeoutMs,
+        agent,
       },
       (upstreamRes) => {
         const responseHeaders = this.applyResponseOverrides(upstreamRes.headers);
-        const responseChunks: Buffer[] = [];
         res.writeHead(upstreamRes.statusCode ?? 502, responseHeaders);
 
         upstreamRes.on('data', (chunk: Buffer) => {
           const buf = Buffer.from(chunk);
-          responseChunks.push(buf);
+          captureBodyChunk(responseBody, buf, this.config.bodyCaptureLimitBytes ?? 0);
           res.write(buf);
         });
 
         upstreamRes.on('end', () => {
           res.end();
           const responseLine = formatStatusLine(upstreamRes.httpVersion, upstreamRes.statusCode, upstreamRes.statusMessage);
-          this.logger.logResponse(targetHost, responseLine, responseHeaders, Buffer.concat(responseChunks));
+          this.logger.logResponse(
+            targetHost,
+            responseLine,
+            responseHeaders,
+            captureBodyBuffer(responseBody),
+            responseBody.truncated,
+          );
         });
       },
     );
@@ -377,14 +426,20 @@ export class ProxyServer {
 
     req.on('data', (chunk: Buffer) => {
       const buf = Buffer.from(chunk);
-      requestBody.push(buf);
+      captureBodyChunk(requestBody, buf, this.config.bodyCaptureLimitBytes ?? 0);
       upstreamReq.write(buf);
     });
 
     req.on('end', () => {
       upstreamReq.end();
       const requestLine = `${req.method ?? 'GET'} ${target.toString()} HTTP/${req.httpVersion}`;
-      this.logger.logRequest(targetHost, requestLine, requestHeaders, Buffer.concat(requestBody));
+      this.logger.logRequest(
+        targetHost,
+        requestLine,
+        requestHeaders,
+        captureBodyBuffer(requestBody),
+        requestBody.truncated,
+      );
     });
 
     req.on('aborted', () => {
@@ -443,7 +498,7 @@ export class ProxyServer {
     const targetHost = target.port ? `${target.hostname}:${target.port}` : target.hostname;
     const requestHeaders = this.buildUpstreamHeaders(req, target);
     const client = target.protocol === 'https:' ? https : http;
-    const requestBody: Buffer[] = [];
+    const agent = target.protocol === 'https:' ? this.httpsAgent : this.httpAgent;
 
     const upstreamReq = client.request(
       {
@@ -458,6 +513,7 @@ export class ProxyServer {
           upgrade: String(req.headers.upgrade ?? 'websocket'),
         },
         timeout: this.config.timeoutMs,
+        agent,
       },
       () => {
         // Normal response isn't expected for upgrades, but keep the socket safe.
@@ -478,7 +534,7 @@ export class ProxyServer {
       }
       socket.pipe(upstreamSocket as net.Socket);
       (upstreamSocket as net.Socket).pipe(socket);
-      this.logger.logRequest(targetHost, `${req.method ?? 'GET'} ${target.toString()} HTTP/${req.httpVersion}`, requestHeaders, Buffer.concat(requestBody));
+      this.logger.logRequest(targetHost, `${req.method ?? 'GET'} ${target.toString()} HTTP/${req.httpVersion}`, requestHeaders);
       this.logger.logResponse(targetHost, formatStatusLine(upstreamRes.httpVersion, upstreamRes.statusCode, upstreamRes.statusMessage), responseHeaders);
     });
 
@@ -655,10 +711,18 @@ export class ProxyServer {
       ? https.createServer(this.getTlsOptions(), handler)
       : http.createServer(handler);
 
+    server.keepAliveTimeout = 60_000;
+    server.headersTimeout = Math.max((this.config.timeoutMs ?? 30_000) + 5_000, 65_000);
+
     server.on('connect', (req, clientSocket, head) => this.handleConnect(req, clientSocket, head));
     server.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
     server.on('error', (error) => {
       console.error(`[${this.config.protocol.toUpperCase()}] Server error:`, error);
+    });
+
+    server.on('close', () => {
+      this.httpAgent.destroy();
+      this.httpsAgent.destroy();
     });
 
     server.listen(this.config.port, this.config.host, () => {
