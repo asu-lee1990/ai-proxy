@@ -99,3 +99,15 @@ curl -x https://127.0.0.1:8443 --proxy-insecure https://example.com/
 ```bash
 curl --socks5 127.0.0.1:1080 http://example.com/
 ```
+
+## 发布 / CI
+
+- 推送到 `main` 后，GitHub Actions 会自动执行 `npm ci` 和 `npm run build`。
+- 本地发布前建议先跑一遍：
+
+```bash
+npm ci
+npm run build
+```
+
+- 如果要发版，建议先更新 `package.json` 的版本号，再打 tag。
