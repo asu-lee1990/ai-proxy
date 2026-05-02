@@ -1,342 +1,278 @@
 # ai-proxy
 
-一个 TypeScript 写的代理程序，支持：
+一个功能强大的 TypeScript 代理服务器，支持 HTTP/HTTPS/SOCKS5 协议、透明代理、TUN 模式以及 MITM HTTPS 解密。
 
-- HTTP 代理
-- HTTPS 代理（代理服务本身走 TLS）
-- SOCKS5 代理
-- 透明代理（HTTP 自动分流；HTTPS 可用于 MITM / 隧道式接入）
-- 基础认证
-- 请求 / 响应日志落盘
-- 请求体 / 响应体大小上限控制
-- HTTP CONNECT 隧道
-- HTTPS CONNECT MITM 解密
-- WebSocket Upgrade 转发
-- 简单状态页：`/status` 和 `/status.json`
+## 功能特性
+
+- **HTTP/HTTPS/SOCKS5 代理** - 标准代理协议支持
+- **透明代理模式** - 无需客户端配置，通过 iptables 重定向流量
+- **TUN 模式（高级功能）** - 内核级虚拟网络接口，捕获所有 IP 层流量
+- **MITM HTTPS 解密** - 支持中间人攻击方式解密 HTTPS 流量（需配置 CA 证书）
+- **状态监控页面** - 实时查看代理状态、连接信息
+- **完整日志系统** - 自动记录请求/响应，支持大文件持久化
+- **可编程配置** - JSON 配置文件 + 命令行参数双重支持
 
 ## 安装
 
 ```bash
+# 克隆项目
+git clone <repository-url>
+cd ai-proxy
+
+# 安装依赖
 npm install
+
+# 编译 TypeScript
 npm run build
 ```
 
-## 测试
+## 使用方法
+
+### 基本 HTTP 代理
 
 ```bash
-npm test
-```
+# 启动 HTTP 代理服务器（默认监听 127.0.0.1:8080）
+npm start
 
-这会先执行 TypeScript 编译，再跑配置、日志和代理转发的单元 / 集成测试。
-
-## 启动
-
-### HTTP 代理
-
-```bash
-npm start -- --protocol http --host 127.0.0.1 --port 8080
+# 自定义端口和主机
+npm start -- --host 0.0.0.0 --port 3128
 ```
 
 ### HTTPS 代理
 
-默认读取项目里的 `ssl/ca.key.pem` 和 `ssl/ca.cert.pem` 作为监听证书：
-
 ```bash
-npm start -- --protocol https --host 127.0.0.1 --port 8443
+# 使用自签名证书启动 HTTPS 代理
+npm start -- --protocol https --tls-key ./ssl/server.key.pem --tls-cert ./ssl/server.cert.pem
+
+# 客户端需要配置信任自签名证书，或使用 --insecure 选项
 ```
 
 ### SOCKS5 代理
 
 ```bash
-npm start -- --protocol socks5 --host 127.0.0.1 --port 1080
+npm start -- --protocol socks5 --host 0.0.0.0 --port 1080
+
+# 配置用户名密码认证
+npm start -- --protocol socks5 --auth-user admin --auth-pass secret
+```
+
+### TUN 模式（需要 root 权限）
+
+TUN 模式创建一个虚拟网络接口，捕获操作系统发出的所有 IP 层流量。
+
+```bash
+# 方法1: 使用 tun-run.sh 脚本（推荐）
+sudo ./scripts/tun-run.sh --iface ai0 -- npm start -- --protocol tun --host 127.0.0.1 --port 8080
+
+# 方法2: 手动配置 TUN 设备后启动
+# 1. 创建 TUN 设备
+sudo ip tuntap add dev tun0 mode tun user $(whoami)
+sudo ip link set tun0 up
+
+# 2. 获取文件描述符并启动代理（需要特殊处理）
+# 参考 scripts/tun-helper.c 获取 TUN 文件描述符
+
+# 参数说明
+--tun-fd <fd>           # 传入已打开的 TUN 文件描述符
+--tun-buffer-size <bytes>  # TUN 数据包读取缓冲区大小（默认 65535）
 ```
 
 ### 透明代理
 
-透明模式用于接收被系统重定向过来的原始 TCP 流量，适合作为 TUN / iptables / 端口重定向后的接入点，主要处理：
-
-- 普通 HTTP 请求：按 Host 头转发
-- HTTPS ClientHello：可用于按 SNI 分流的实验性接入
+透明代理模式通过 iptables 规则将系统流量重定向到代理服务器，无需在应用程序中配置代理设置。
 
 ```bash
-npm start -- \
-  --protocol transparent \
-  --host 0.0.0.0 \
-  --port 8080
-```
+# 1. 配置 iptables 规则（需要 root 权限）
+sudo ./scripts/tun-deploy.sh
 
-如果要在透明模式下做 HTTPS 解密：
+# 默认使用 OUTPUT 模式（本机流量）
+# 如需代理局域网内其他设备流量，使用 PREROUTING 模式：
+PROXY_PORT=8080 MODE=prerouting sudo ./scripts/tun-deploy.sh
 
-```bash
-npm start -- \
-  --protocol transparent \
-  --host 0.0.0.0 \
-  --port 8080 \
-  --mitm \
-  --mitm-ca-key ./ssl/ca.key.pem \
-  --mitm-ca-cert ./ssl/ca.cert.pem \
-  --mitm-cache-dir ./ssl/mitm-cache
-```
-
-透明模式默认会把 HTTPS 上游连接到 `:443`，HTTP 以 Host 头里的端口为准。可以用：
-
-- `--transparent-http-port`
-- `--transparent-tls-port`
-
-来调试特殊环境下的回退端口。
-
-### Linux 透明代理部署脚本
-
-仓库里提供了几份脚本：
-
-- `scripts/tun-helper.c`：真正创建 `/dev/net/tun` 的最小 privileged helper
-- `scripts/tun-run.sh`：编译并运行 helper 的包装脚本
-- `scripts/tun-deploy.sh`：创建/刷新 iptables 透明重定向规则
-- `scripts/tun-cleanup.sh`：清理这套规则
-
-这套脚本的定位是 **透明重定向接入**，而 `scripts/tun-helper.c` 则是创建真实 kernel TUN 的最小 helper。它们适合把系统的 HTTP / HTTPS 流量导到本地 `ai-proxy`，再由代理负责日志、MITM、转发。
-
-#### 前置条件
-
-- Linux
-- root 权限（或能执行 `iptables`）
-- 已安装 `iptables`
-- 已安装 `gcc`（如果要编译 `tun-helper.c`）
-- `ai-proxy` 已在本机启动透明/TUN 模式，例如：
-
-```bash
+# 2. 启动透明代理服务器
 npm start -- --protocol transparent --host 127.0.0.1 --port 8080
-```
 
-如果你要跑真正的 kernel TUN helper，可以用：
-
-```bash
-sudo ./scripts/tun-run.sh --iface ai0 -- npm start -- --protocol tun
-```
-
-如果要解密 HTTPS CONNECT 或透明 TLS，可以再加：
-
-```bash
-npm start -- \
-  --protocol transparent \
-  --host 127.0.0.1 \
-  --port 8080 \
-  --mitm \
+# 可选: 启用 MITM HTTPS 解密
+npm start -- --protocol transparent --host 127.0.0.1 --port 8080 --mitm \
   --mitm-ca-key ./ssl/ca.key.pem \
   --mitm-ca-cert ./ssl/ca.cert.pem \
   --mitm-cache-dir ./ssl/mitm-cache
 ```
 
-#### 本机透明代理（推荐先跑这个）
-
-默认按 `OUTPUT` 链做本机透明代理，把 80/443 的流量重定向到本地 `ai-proxy`。
-
+**清理 iptables 规则：**
 ```bash
-sudo PROXY_PORT=8080 PROXY_USER=$USER ./scripts/tun-deploy.sh
+# 透明代理会创建一个名为 AI_PROXY_TUN 的 iptables chain
+# 清理规则：
+sudo iptables -t nat -F AI_PROXY_TUN
+sudo iptables -t nat -D OUTPUT -j AI_PROXY_TUN 2>/dev/null || true
+sudo iptables -t nat -X AI_PROXY_TUN 2>/dev/null || true
 ```
 
-或者，如果代理是单独的系统用户运行，可以排除它自己的出站流量：
+## 配置
 
-```bash
-sudo PROXY_PORT=8080 PROXY_UID=$(id -u ai-proxy) ./scripts/tun-deploy.sh
-```
+### 命令行参数
 
-#### 网关 / 转发场景
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `-c, --config <path>` | 配置文件路径 | - |
+| `--host <host>` | 监听主机 | 127.0.0.1 |
+| `--port <port>` | 监听端口 | 8080 |
+| `--protocol <protocol>` | 协议: http, https, socks5, transparent, tun | http |
+| `--log-dir <path>` | 日志目录 | ./log |
+| `--auth-user <user>` | 认证用户名 | - |
+| `--auth-pass <pass>` | 认证密码 | - |
+| `--tls-key <path>` | TLS 私钥路径 (HTTPS) | - |
+| `--tls-cert <path>` | TLS 证书路径 (HTTPS) | - |
+| `--mitm` | 启用 HTTPS MITM 解密 | false |
+| `--mitm-insecure-upstream` | MITM 时禁用上游证书验证 | false |
+| `--mitm-ca-key <path>` | MITM CA 私钥路径 | - |
+| `--mitm-ca-cert <path>` | MITM CA 证书路径 | - |
+| `--mitm-cache-dir <path>` | MITM 证书缓存目录 | ./ssl/mitm-cache |
+| `--transparent-http-port <port>` | 透明代理 HTTP 回退端口 | 80 |
+| `--transparent-tls-port <port>` | 透明代理 TLS 回退端口 | 443 |
+| `--tun-fd <fd>` | TUN 文件描述符 | - |
+| `--tun-buffer-size <bytes>` | TUN 读取缓冲区大小 | 65535 |
+| `--request-header <header>` | 添加上游请求头 (key=value) | - |
+| `--response-header <header>` | 注入响应头 (key=value) | - |
+| `--timeout-ms <ms>` | 上游超时时间(毫秒) | 30000 |
+| `--log-body-max-bytes <bytes>` | 请求/响应体最大日志字节数 | 262144 |
+| `--quiet` | 禁用控制台日志 | false |
 
-如果你在 Linux 网关、虚拟机或转发主机上部署，可切换到 `PREROUTING`：
+### 配置文件
 
-```bash
-sudo MODE=prerouting PROXY_PORT=8080 ./scripts/tun-deploy.sh
-```
-
-注意：这类场景通常还需要你自己额外处理路由、返回路径和 `net.ipv4.ip_forward=1`。
-
-#### 调整重定向端口
-
-脚本默认只重定向：
-
-- `HTTP_PORTS=80`
-- `HTTPS_PORTS=443`
-
-如果你想改成别的端口范围，可以直接传环境变量：
-
-```bash
-sudo HTTP_PORTS=80,8080 HTTPS_PORTS=443,8443 PROXY_PORT=8080 ./scripts/tun-deploy.sh
-```
-
-#### 验证
-
-启用规则后，可以先看状态页确认代理在工作：
-
-- `http://127.0.0.1:8080/status`
-- `http://127.0.0.1:8080/status.json`
-
-如果前面还有 Nginx，也可以把这两个路径转发过去。
-
-#### 清理规则
-
-```bash
-sudo ./scripts/tun-cleanup.sh
-```
-
-#### 常见注意点
-
-- 这不是完整的 kernel TUN；它是 iptables 透明重定向。
-- 透明 HTTPS 解密依赖 `--mitm` 和你的 CA 证书。
-- 如果代理自己的流量被重定向回自己，优先检查 `PROXY_UID` / `PROXY_USER`。
-- 如果网络环境复杂，先用 `MODE=output` 在单机上验证，再上 `prerouting`。
-
-### 开启 MITM 解密（CONNECT）
-
-MITM 模式用于解密 HTTPS CONNECT 流量，并把请求 / 响应记录下来。
-
-```bash
-npm start -- \
-  --protocol http \
-  --host 127.0.0.1 \
-  --port 8080 \
-  --mitm \
-  --mitm-ca-key ./ssl/ca.key.pem \
-  --mitm-ca-cert ./ssl/ca.cert.pem \
-  --mitm-cache-dir ./ssl/mitm-cache
-```
-
-如果你的上游环境是自签名证书或实验环境，也可以显式放宽上游证书校验：
-
-```bash
-npm start -- --mitm --mitm-insecure-upstream
-```
-
-## 状态页
-
-代理启动后，可以直接访问：
-
-- `http://127.0.0.1:8080/status`
-- `http://127.0.0.1:8080/status.json`
-
-如果前面还有 Nginx，也可以把这两个路径转发过去。
-
-状态页会显示：
-
-- 协议、主机、端口
-- 运行时长
-- 日志目录
-- body 捕获上限
-- 认证是否开启
-- MITM / 透明代理开关
-- 请求 / 响应 / 错误 / CONNECT / MITM / UPGRADE / SOCKS5 / 透明连接计数
-- 最近 10 条事件
-
-## 认证
-
-```bash
-npm start -- --protocol http --auth-user proxyuser --auth-pass proxypass
-```
-
-SOCKS5 模式下如果提供了 `--auth-user` / `--auth-pass`，会启用用户名密码认证。
-
-## 配置文件
+配置文件支持 JSON 格式：
 
 ```json
 {
-  "host": "127.0.0.1",
+  "host": "0.0.0.0",
   "port": 8080,
   "protocol": "http",
   "logDir": "./log",
-  "authUser": "proxyuser",
-  "authPass": "proxypass",
+  "authUser": "admin",
+  "authPass": "secret",
   "mitmEnabled": true,
-  "mitmInsecureUpstream": true,
   "mitmCaKeyPath": "./ssl/ca.key.pem",
   "mitmCaCertPath": "./ssl/ca.cert.pem",
-  "mitmCacheDir": "./ssl/mitm-cache",
-  "transparentHttpPort": 80,
-  "transparentTlsPort": 443,
-  "requestHeaders": ["x-added-request=1"],
-  "responseHeaders": ["x-added-response=1"],
-  "timeoutMs": 30000,
-  "bodyCaptureLimitBytes": 262144
+  "requestHeaders": ["X-Custom-Header=value"],
+  "timeoutMs": 30000
 }
 ```
 
-启动：
-
+使用配置文件启动：
 ```bash
 npm start -- --config ./proxy.config.json
 ```
 
-## 日志
+## 架构设计
 
-日志会写到：
+ai-proxy 采用模块化设计，核心组件包括：
 
-- `./log/req/<host>/...req`
-- `./log/rsp/<host>/...rsp`
-- `./log/body/req/<host>/...`
-- `./log/body/rsp/<host>/...`
+### ProxyServer
 
-当响应包含较大的二进制内容或 `content-disposition` 时，正文会保存成文件，日志里会写 `file://...` 路径。
+`ProxyServer` 是主入口类，负责：
+- 创建 HTTP/HTTPS/SOCKS5 代理服务器
+- 管理各种代理协议的处理逻辑
+- 集成 MITM 中间人攻击解密功能
+- 支持透明代理的流量识别和转发
 
-默认会把请求 / 响应体截断到 `256 KiB`，避免大流量把内存和日志撑爆。可以通过 `--log-body-max-bytes` 调整。
+### TunSessionManager
 
-## 示例
+`TunSessionManager` 是 TUN 模式的核心，负责：
+- 从 TUN 设备读取原始 IP 数据包
+- 解析 IPv4 和 TCP 协议头
+- 维护 TCP 会话状态机（SYN、SYN-ACK、ESTABLISHED、FIN 等）
+- 管理会话生命周期和数据包重组
 
-### HTTP 代理测试
+### TunTcpBridge
 
-```bash
-curl -x http://127.0.0.1:8080 http://example.com/
+`TunTcpBridge` 负责 TUN 模式下的 TCP 桥接：
+- 将 TUN 会话的客户端数据桥接到真实的目标服务器
+- 处理客户端到服务器 (c2s) 和服务器到客户端 (s2c) 的数据流
+- 维护完整的 TCP 字节流，支持数据重传和顺序保证
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        ai-proxy                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │ HTTP Proxy  │  │HTTPS/SOCKS5 │  │    Transparent Proxy    │  │
+│  │   Server    │  │   Server    │  │                         │  │
+│  └──────┬──────┘  └──────┬──────┘  └─────────────────────────┘  │
+│         │                │                                      │
+│         └────────────────┴────────────────┬────────────────────┘
+│                                           │                      │
+│  ┌──────────────────────────────────────┐ │  ┌────────────────┐  │
+│  │           ProxyServer                 │◄┘  │ MITM Decrypt │  │
+│  │  - Request routing                   │    │ - CA signing │  │
+│  │  - Header manipulation              │    │ - Cert cache │  │
+│  │  - Auth handling                     │    └────────────────┘  │
+│  └──────────────────────────────────────┘                       │
+│                                                                  │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │                    TUN Mode (Optional)                    │   │
+│  │  ┌─────────────────┐      ┌────────────────────────────┐  │   │
+│  │  │ TunSessionManager│     │      TunTcpBridge          │  │   │
+│  │  │ - IP packet parse │◄────►│ - TCP session bridging    │  │   │
+│  │  │ - TCP state mgmt  │     │ - c2s/s2c data flow        │  │   │
+│  │  │ - Session tracking│     │ - Byte stream handling     │  │   │
+│  │  └─────────────────┘      └────────────────────────────┘  │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  ┌────────────────────────────────────────────────────────────┐│
+│  │                         Logger                              ││
+│  │  - Request/Response logging    - Binary body persistence    ││
+│  │  - Structured storage          - Automatic rotation         ││
+│  └────────────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-### HTTPS 代理测试
+## 测试
 
 ```bash
-curl -x https://127.0.0.1:8443 --proxy-insecure https://example.com/
-```
+# 编译并运行测试
+npm test
 
-### SOCKS5 代理测试
-
-```bash
-curl --socks5 127.0.0.1:1080 http://example.com/
-```
-
-### 透明代理测试
-
-HTTP 透明代理时，客户端仍然发普通 HTTP 请求，只是被系统重定向到代理：
-
-```bash
-curl -H 'Host: example.com' http://127.0.0.1:8080/
-```
-
-HTTPS 透明代理时，客户端直接做 TLS 握手，代理按 SNI 分流：
-
-```bash
-curl --cacert ./ssl/ca.cert.pem https://example.com/
-```
-
-### MITM 测试（CONNECT）
-
-当 `--mitm` 开启后，先把 proxy CA 证书交给客户端信任：
-
-```bash
-curl -x http://127.0.0.1:8080 --cacert ./ssl/ca.cert.pem https://example.com/
-```
-
-## 目录结构
-
-- `src/`：TypeScript 源码
-- `dist/`：编译后的 JS 输出
-- `test/`：测试
-- `ssl/`：CA 根证书和 MITM 缓存
-- `log/`：请求 / 响应日志
-- `log-webui/`：状态页日志
-
-## 发布 / CI
-
-- 推送到 `main` 后，GitHub Actions 会自动执行 `npm ci` 和 `npm run build`。
-- 本地发布前建议先跑一遍：
-
-```bash
-npm ci
+# 仅编译
 npm run build
+
+# 开发模式（热重载）
+npm run dev
 ```
 
-- 如果要发版，建议先更新 `package.json` 的版本号，再打 tag。
+测试文件位于 `test/` 目录，包含：
+- 代理连接测试
+- 协议处理测试
+- 日志记录测试
+
+## SSL/TLS 证书生成
+
+如需使用 MITM 功能，需要生成 CA 证书：
+
+```bash
+# 创建证书目录
+mkdir -p ssl/mitm-cache
+
+# 生成 CA 私钥和证书
+openssl genrsa -out ssl/ca.key.pem 2048
+openssl req -x509 -new -nodes -key ssl/ca.key.pem -sha256 -days 3650 -out ssl/ca.cert.pem \
+  -subj "/C=CN/O=ai-proxy/CN=ai-proxy CA"
+
+# 生成服务器证书（用于 HTTPS 监听）
+openssl genrsa -out ssl/server.key.pem 2048
+openssl req -new -key ssl/server.key.pem -out ssl/server.csr \
+  -subj "/C=CN/O=ai-proxy/CN=localhost"
+openssl x509 -req -in ssl/server.csr -CA ssl/ca.cert.pem -CAkey ssl/ca.key.pem \
+  -CAcreateserial -out ssl/server.cert.pem -days 365 -sha256
+```
+
+将 `ssl/ca.cert.pem` 安装到客户端信任库，即可自动信任 MITM 生成的所有证书。
+
+## 许可证
+
+MIT License
+
+---
+
+**项目状态**: 活跃开发中
+
+**问题反馈**: 请通过 GitHub Issues 提交
