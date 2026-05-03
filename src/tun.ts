@@ -149,7 +149,7 @@ function randomU32(): number {
   return crypto.randomBytes(4).readUInt32BE(0);
 }
 
-function buildIpv4TcpPacket(options: {
+export function buildIpv4TcpPacket(options: {
   srcIp: string;
   dstIp: string;
   srcPort: number;

@@ -22,7 +22,16 @@ static int create_tun(const char *iface_name, char *actual_name, size_t actual_n
 
   struct ifreq ifr;
   memset(&ifr, 0, sizeof(ifr));
-  ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+  /* Allow toggling packet-info (PI) mode via environment variable
+     TUN_USE_PI=1  -> enable PI (do not set IFF_NO_PI)
+     default (unset) -> use IFF_NO_PI for raw packet data without extra header */
+  const char *use_pi = getenv("TUN_USE_PI");
+  if (use_pi && (use_pi[0] == '1')) {
+    ifr.ifr_flags = IFF_TUN; /* include PI (packet info) */
+  } else {
+    ifr.ifr_flags = IFF_TUN | IFF_NO_PI; /* no packet info (default) */
+  }
+
   if (iface_name && iface_name[0] != '\0') {
     strncpy(ifr.ifr_name, iface_name, IFNAMSIZ - 1);
     ifr.ifr_name[IFNAMSIZ - 1] = '\0';
