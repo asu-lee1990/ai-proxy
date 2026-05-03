@@ -530,6 +530,7 @@ export class ProxyServer {
   private readonly httpsAgent: https.Agent;
   private readonly mitmAuthority?: MitmCertificateAuthority;
   private tunBridge?: TunTcpBridge;
+  private server?: http.Server | https.Server | net.Server;
   private readonly startedAt = Date.now();
   private readonly recentEvents: ProxyEvent[] = [];
   private readonly stats = {
@@ -1009,7 +1010,7 @@ export class ProxyServer {
     }
   }
 
-  private startTunMode(): net.Server {
+  private startTunMode(): Promise<net.Server> {
     const tunFdValue = this.config.tunFd ?? Number.parseInt(process.env.TUN_FD || '', 10);
     if (!Number.isInteger(tunFdValue) || tunFdValue < 0) {
       throw new Error('TUN mode requires a valid TUN_FD environment variable or --tun-fd');
@@ -1046,8 +1047,9 @@ export class ProxyServer {
 
     const server = new net.Server();
     server.unref();
+    this.server = server;
     this.log(`TUN monitor attached to fd=${tunFdValue} iface=${tunIface}`);
-    return server;
+    return Promise.resolve(server);
   }
 
   private handleMitmConnect(req: IncomingMessage, clientSocket: Duplex, head: Buffer): void {
@@ -1363,7 +1365,7 @@ export class ProxyServer {
     }
   }
 
-  start(): http.Server | https.Server | net.Server {
+  start(): Promise<http.Server | https.Server | net.Server> {
     if (this.config.protocol === 'socks5') {
       const server = net.createServer((socket) => {
         void this.handleSocks5Connection(socket);
@@ -1373,10 +1375,13 @@ export class ProxyServer {
         console.error('[SOCKS5] Server error:', error);
       });
 
-      server.listen(this.config.port, this.config.host, () => {
-        this.log(`SOCKS5 proxy listening on socks5://${this.config.host}:${this.config.port}`);
+      this.server = server;
+      return new Promise((resolve) => {
+        server.listen(this.config.port, this.config.host, () => {
+          this.log(`SOCKS5 proxy listening on socks5://${this.config.host}:${this.config.port}`);
+          resolve(server);
+        });
       });
-      return server;
     }
 
     const handler = (req: IncomingMessage, res: ServerResponse) => {
@@ -1447,11 +1452,32 @@ export class ProxyServer {
       server = requestServer;
     }
 
-    server.listen(this.config.port, this.config.host, () => {
-      this.log(`${this.config.protocol.toUpperCase()} proxy listening on ${this.config.protocol}://${this.config.host}:${this.config.port}`);
-      this.log(`Log directory: ${path.resolve(this.config.logDir)}`);
+    this.server = server;
+    return new Promise((resolve) => {
+      server.listen(this.config.port, this.config.host, () => {
+        this.log(`${this.config.protocol.toUpperCase()} proxy listening on ${this.config.protocol}://${this.config.host}:${this.config.port}`);
+        this.log(`Log directory: ${path.resolve(this.config.logDir)}`);
+        resolve(server);
+      });
     });
+  }
 
-    return server;
+  address(): net.AddressInfo | string | null {
+    return this.server?.address() ?? null;
+  }
+
+  close(callback?: (err?: Error) => void): this {
+    if (this.server) {
+      try {
+        this.server.close(callback);
+      } catch (err) {
+        if (callback) {
+          callback(err as Error);
+        }
+      }
+    } else if (callback) {
+      callback();
+    }
+    return this;
   }
 }

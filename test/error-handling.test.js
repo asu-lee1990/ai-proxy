@@ -17,15 +17,18 @@ test('ProxyServer rejects invalid protocol gracefully', async () => {
   
   // Note: This test assumes the server validates protocol
   // If protocol is not validated, the test documents expected behavior
-  const server = new ProxyServer(config);
+  const proxy = new ProxyServer(config);
+  let server;
   
   try {
-    await server.start();
+    server = await proxy.start();
     // If it starts, that's also valid behavior (fallback)
   } catch (err) {
     assert.ok(err.message.includes('protocol') || err.message.includes('Invalid'));
   } finally {
-    await closeServer(server);
+    if (server) {
+      await closeServer(server);
+    }
   }
 });
 
@@ -39,23 +42,26 @@ test('ProxyServer handles port in use', async () => {
   // Try to create proxy on same port
   const config = normalizeConfig({ port: blockedPort, host: '127.0.0.1' });
   const proxy = new ProxyServer(config);
+  let server;
 
   try {
-    await proxy.start();
+    server = await proxy.start();
     // Some implementations may succeed if binding to 0.0.0.0 vs 127.0.0.1
   } catch (err) {
     assert.ok(err.message.includes('EADDRINUSE') || err.code === 'EADDRINUSE');
   } finally {
     blockingServer.close();
-    await closeServer(proxy);
+    if (server) {
+      await closeServer(server);
+    }
     await new Promise((r) => setTimeout(r, 100));
   }
 });
 
 test('ProxyServer handles connection to non-existent upstream', async () => {
   const config = normalizeConfig({ port: 0 });
-  const server = new ProxyServer(config);
-  await server.start();
+  const proxy = new ProxyServer(config);
+  const server = await proxy.start();
   const port = getPort(server);
 
   const client = http.request({
@@ -79,8 +85,8 @@ test('ProxyServer handles connection to non-existent upstream', async () => {
 
 test('ProxyServer handles malformed HTTP requests gracefully', async () => {
   const config = normalizeConfig({ port: 0 });
-  const server = new ProxyServer(config);
-  await server.start();
+  const proxy = new ProxyServer(config);
+  const server = await proxy.start();
   const port = getPort(server);
 
   // Send garbage data
@@ -110,8 +116,8 @@ test('ProxyServer handles very large request body', async () => {
     port: 0, 
     bodyCaptureLimitBytes: 1024 // 1KB limit
   });
-  const server = new ProxyServer(config);
-  await server.start();
+  const proxy = new ProxyServer(config);
+  const server = await proxy.start();
   const port = getPort(server);
 
   // Create target server

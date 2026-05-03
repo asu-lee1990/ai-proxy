@@ -88,8 +88,7 @@ async function createProxyServer(protocol, logDir, extra = {}) {
       ...extra,
     }),
   );
-  const server = proxy.start();
-  await listen(server);
+  const server = await proxy.start();
   return server;
 }
 
