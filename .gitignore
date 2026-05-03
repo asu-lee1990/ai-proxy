@@ -2,3 +2,9 @@ dist/
 node_modules/
 log/
 log-test/
+log-webui/
+*.log
+scripts/.build/
+ssl/ca.cert.srl
+proxy*.config.json
+run-tests.js
