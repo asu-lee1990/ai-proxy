@@ -1376,7 +1376,8 @@ export class ProxyServer {
       });
 
       this.server = server;
-      return new Promise((resolve) => {
+      return new Promise((resolve, reject) => {
+        server.once('error', reject);
         server.listen(this.config.port, this.config.host, () => {
           this.log(`SOCKS5 proxy listening on socks5://${this.config.host}:${this.config.port}`);
           resolve(server);
@@ -1453,7 +1454,8 @@ export class ProxyServer {
     }
 
     this.server = server;
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      server.once('error', reject);
       server.listen(this.config.port, this.config.host, () => {
         this.log(`${this.config.protocol.toUpperCase()} proxy listening on ${this.config.protocol}://${this.config.host}:${this.config.port}`);
         this.log(`Log directory: ${path.resolve(this.config.logDir)}`);

@@ -27,6 +27,7 @@ test('ProxyServer rejects invalid protocol gracefully', async () => {
     assert.ok(err.message.includes('protocol') || err.message.includes('Invalid'));
   } finally {
     if (server) {
+      server.closeAllConnections?.();
       await closeServer(server);
     }
   }
@@ -52,6 +53,7 @@ test('ProxyServer handles port in use', async () => {
   } finally {
     blockingServer.close();
     if (server) {
+      server.closeAllConnections?.();
       await closeServer(server);
     }
     await new Promise((r) => setTimeout(r, 100));
@@ -80,6 +82,7 @@ test('ProxyServer handles connection to non-existent upstream', async () => {
 
   // Give time for error handling
   await new Promise((resolve) => setTimeout(resolve, 500));
+  server.closeAllConnections?.();
   await closeServer(server);
 });
 
@@ -105,6 +108,7 @@ test('ProxyServer handles malformed HTTP requests gracefully', async () => {
   });
 
   socket.destroy();
+  server.closeAllConnections?.();
   await closeServer(server);
   
   // Server should still be alive after handling garbage
@@ -153,5 +157,6 @@ test('ProxyServer handles very large request body', async () => {
 
   req.end();
   target.close();
+  server.closeAllConnections?.();
   await closeServer(server);
 });
